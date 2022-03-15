@@ -907,12 +907,6 @@ func (s *Server) dispatch(ctx context.Context, ch ssh.Channel, req *ssh.Request,
 			return s.handleEnv(ch, req, scx)
 		case sshutils.SubsystemRequest:
 			return s.handleSubsystem(ch, req, scx)
-		case sshutils.AgentForwardRequest:
-			err := s.handleAgentForward(ch, req, scx)
-			if err != nil {
-				s.log.Debug(err)
-			}
-			return nil
 		default:
 			return trace.AccessDenied("attempted %v request in join-only mode", req.Type)
 		}
