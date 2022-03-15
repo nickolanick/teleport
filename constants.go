@@ -637,7 +637,8 @@ const (
 	EnvSSHSessionDisplayParticipantRequirements = "TELEPORT_SESSION_PARTICIPANT_REQUIREMENTS"
 
 	// SSHSessionJoinPrincipal is the SSH principal used when joining sessions.
-	SSHSessionJoinPrincipal = "teleport-internal-join"
+	// This starts with a hyphen so it isn't a valid unix login.
+	SSHSessionJoinPrincipal = "-teleport-internal-join"
 )
 
 const (
