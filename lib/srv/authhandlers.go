@@ -235,7 +235,7 @@ func (h *AuthHandlers) UserKeyAuth(conn ssh.ConnMetadata, key ssh.PublicKey) (*s
 		log.Debugf("auth attempt, unsupported key type")
 		return nil, trace.BadParameter("unsupported key type: %v", fingerprint)
 	}
-	if len(cert.ValidPrincipals) == 0 && conn.User() != teleport.SSHSessionJoinPrincipal {
+	if len(cert.ValidPrincipals) == 0 {
 		log.Debugf("need a valid principal for key")
 		return nil, trace.BadParameter("need a valid principal for key %v", fingerprint)
 	}
