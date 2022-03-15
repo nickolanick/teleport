@@ -235,7 +235,7 @@ func (h *AuthHandlers) UserKeyAuth(conn ssh.ConnMetadata, key ssh.PublicKey) (*s
 		log.Debugf("auth attempt, unsupported key type")
 		return nil, trace.BadParameter("unsupported key type: %v", fingerprint)
 	}
-	if len(cert.ValidPrincipals) == 0 {
+	if len(cert.ValidPrincipals) == 0 && conn.User() != teleport.SSHSessionJoinPrincipal {
 		log.Debugf("need a valid principal for key")
 		return nil, trace.BadParameter("need a valid principal for key %v", fingerprint)
 	}
@@ -318,7 +318,7 @@ func (h *AuthHandlers) UserKeyAuth(conn ssh.ConnMetadata, key ssh.PublicKey) (*s
 
 	// check if the user has permission to log into the node.
 	switch {
-	case h.c.Component == teleport.ComponentForwardingNode:
+	case h.c.Component == teleport.ComponentForwardingNode, conn.User() == teleport.SSHSessionJoinPrincipal:
 		err = h.canLoginWithoutRBAC(cert, clusterName.GetClusterName(), teleportUser, conn.User())
 	default:
 		err = h.canLoginWithRBAC(cert, clusterName.GetClusterName(), teleportUser, conn.User())

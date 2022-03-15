@@ -635,6 +635,9 @@ const (
 	// EnvSSHSessionDisplayParticipantRequirements is set to true or false to indicate if participant
 	// requirement information should be printed.
 	EnvSSHSessionDisplayParticipantRequirements = "TELEPORT_SESSION_PARTICIPANT_REQUIREMENTS"
+
+	// SSHSessionJoinPrincipal is the SSH principal used when joining sessions.
+	SSHSessionJoinPrincipal = "teleport-internal-join"
 )
 
 const (
