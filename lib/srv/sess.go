@@ -210,6 +210,11 @@ func (s *SessionRegistry) OpenSession(ch ssh.Channel, req *ssh.Request, ctx *Ser
 
 		return nil
 	}
+
+	if ctx.JoinOnly {
+		return trace.AccessDenied("join-only mode was used to create this connection but attempted to create a new session.")
+	}
+
 	// session not found? need to create one. start by getting/generating an ID for it
 	sid, found := ctx.GetEnv(sshutils.SessionEnvVar)
 	if !found {

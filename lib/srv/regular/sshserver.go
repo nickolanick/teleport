@@ -1419,6 +1419,31 @@ func (s *Server) dispatch(ch ssh.Channel, req *ssh.Request, ctx *srv.ServerConte
 		}
 	}
 
+	if ctx.JoinOnly {
+		switch req.Type {
+		case sshutils.PTYRequest:
+			return s.termHandlers.HandlePTYReq(ch, req, ctx)
+		case sshutils.ShellRequest:
+			return s.termHandlers.HandleShell(ch, req, ctx)
+		case sshutils.WindowChangeRequest:
+			return s.termHandlers.HandleWinChange(ch, req, ctx)
+		case teleport.ForceTerminateRequest:
+			return s.termHandlers.HandleForceTerminate(ch, req, ctx)
+		case sshutils.EnvRequest:
+			return s.handleEnv(ch, req, ctx)
+		case sshutils.SubsystemRequest:
+			return s.handleSubsystem(ch, req, ctx)
+		case sshutils.AgentForwardRequest:
+			err := s.handleAgentForwardNode(req, ctx)
+			if err != nil {
+				log.Warn(err)
+			}
+			return nil
+		default:
+			return trace.AccessDenied("attempted %v request in join-only mode", req.Type)
+		}
+	}
+
 	switch req.Type {
 	case sshutils.ExecRequest:
 		return s.termHandlers.HandleExec(ch, req, ctx)

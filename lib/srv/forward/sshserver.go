@@ -893,6 +893,31 @@ func (s *Server) handleSessionChannel(ctx context.Context, nch ssh.NewChannel) {
 func (s *Server) dispatch(ctx context.Context, ch ssh.Channel, req *ssh.Request, scx *srv.ServerContext) error {
 	scx.Debugf("Handling request %v, want reply %v.", req.Type, req.WantReply)
 
+	if scx.JoinOnly {
+		switch req.Type {
+		case sshutils.PTYRequest:
+			return s.termHandlers.HandlePTYReq(ch, req, scx)
+		case sshutils.ShellRequest:
+			return s.termHandlers.HandleShell(ch, req, scx)
+		case sshutils.WindowChangeRequest:
+			return s.termHandlers.HandleWinChange(ch, req, scx)
+		case teleport.ForceTerminateRequest:
+			return s.termHandlers.HandleForceTerminate(ch, req, scx)
+		case sshutils.EnvRequest:
+			return s.handleEnv(ch, req, scx)
+		case sshutils.SubsystemRequest:
+			return s.handleSubsystem(ch, req, scx)
+		case sshutils.AgentForwardRequest:
+			err := s.handleAgentForward(ch, req, scx)
+			if err != nil {
+				s.log.Debug(err)
+			}
+			return nil
+		default:
+			return trace.AccessDenied("attempted %v request in join-only mode", req.Type)
+		}
+	}
+
 	switch req.Type {
 	case sshutils.ExecRequest:
 		return s.termHandlers.HandleExec(ch, req, scx)
