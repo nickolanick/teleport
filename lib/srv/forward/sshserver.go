@@ -893,6 +893,8 @@ func (s *Server) handleSessionChannel(ctx context.Context, nch ssh.NewChannel) {
 func (s *Server) dispatch(ctx context.Context, ch ssh.Channel, req *ssh.Request, scx *srv.ServerContext) error {
 	scx.Debugf("Handling request %v, want reply %v.", req.Type, req.WantReply)
 
+	// Certs with a join-only principal can only use a
+	// subset of all the possible request types.
 	if scx.JoinOnly {
 		switch req.Type {
 		case sshutils.PTYRequest:

@@ -1419,6 +1419,8 @@ func (s *Server) dispatch(ch ssh.Channel, req *ssh.Request, ctx *srv.ServerConte
 		}
 	}
 
+	// Certs with a join-only principal can only use a
+	// subset of all the possible request types.
 	if ctx.JoinOnly {
 		switch req.Type {
 		case sshutils.PTYRequest:
