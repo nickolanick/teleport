@@ -620,6 +620,9 @@ const (
 	// ForceTerminateRequest is an SSH request to forcefully terminate a session.
 	ForceTerminateRequest = "x-teleport-force-terminate"
 
+	// TerminalSizeRequest is a request for the terminal size of the session.
+	TerminalSizeRequest = "x-teleport-terminal-size"
+
 	// MFAPresenceRequest is an SSH request to notify clients that MFA presence is required for a session.
 	MFAPresenceRequest = "x-teleport-mfa-presence"
 

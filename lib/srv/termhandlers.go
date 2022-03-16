@@ -141,6 +141,18 @@ func (t *TermHandlers) HandleForceTerminate(ch ssh.Channel, req *ssh.Request, ct
 	return trace.Wrap(err)
 }
 
+func (t *TermHandlers) HandleTerminalSize(ch ssh.Channel, req *ssh.Request, ctx *ServerContext) error {
+	sessionID := string(req.Payload)
+	size, err := t.SessionRegistry.GetTerminalSize(ctx, sessionID)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+
+	payload := ssh.Marshal(size)
+	req.Reply(true, payload)
+	return nil
+}
+
 func parseExecRequest(req *ssh.Request, ctx *ServerContext) (Exec, error) {
 	var err error
 

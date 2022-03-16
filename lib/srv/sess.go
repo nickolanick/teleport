@@ -42,6 +42,7 @@ import (
 	rsession "github.com/gravitational/teleport/lib/session"
 	"github.com/gravitational/teleport/lib/sshutils"
 	"github.com/gravitational/teleport/lib/utils"
+	"github.com/moby/term"
 
 	"github.com/gravitational/trace"
 	"github.com/prometheus/client_golang/prometheus"
@@ -350,6 +351,27 @@ func (s *SessionRegistry) ForceTerminate(ctx *ServerContext) error {
 	}
 
 	return nil
+}
+
+func (s *SessionRegistry) GetTerminalSize(ctx *ServerContext, sessionID string) (*term.Winsize, error) {
+	sess := ctx.getSession()
+	if sess == nil {
+		return nil, trace.NotFound("No session found in context.")
+	}
+
+	roles := []types.Role(ctx.Identity.RoleSet)
+	accessContext := auth.SessionAccessContext{
+		Roles: roles,
+	}
+
+	modes, err := sess.access.CanJoin(accessContext)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	} else if len(modes) == 0 {
+		return nil, trace.AccessDenied("no access to session")
+	}
+
+	return sess.term.GetWinSize()
 }
 
 // leaveSession removes the given party from this session.
