@@ -269,15 +269,17 @@ func (a *ServerWithRoles) GetActiveSessionTrackers(ctx context.Context) ([]types
 		evaluator := NewSessionAccessEvaluator(session.GetHostPolicySets(), session.GetSessionKind())
 		joinerRoles, err := a.authServer.GetRoles(ctx)
 		if err != nil {
+			log.Warnf("Session %v is not allowed to joddin: %v", session.GetSessionID(), err)
 			return nil, trace.Wrap(err)
 		}
 
 		modes, err := evaluator.CanJoin(SessionAccessContext{Roles: joinerRoles})
 		if err == nil || len(modes) > 0 {
 			filteredSessions = append(filteredSessions, session)
+		} else {
+			log.Warnf("Session %v is not allowed to join: %v", session.GetSessionID(), err)
 		}
 	}
-
 	return filteredSessions, nil
 }
 

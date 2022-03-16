@@ -1569,6 +1569,9 @@ message CreateSessionTrackerRequest {
     // creation.
     repeated types.SessionTrackerPolicySet HostPolicies = 14
         [ (gogoproto.jsontag) = "host_policies,omitempty" ];
+
+    // AttachedData is arbitrary attached JSON serialized metadata.
+    string AttachedData = 15 [ (gogoproto.jsontag) = "attached,omitempty" ];
 }
 
 // GetSessionTrackerRequest is a request to fetch a session resource.

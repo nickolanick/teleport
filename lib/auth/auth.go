@@ -1048,7 +1048,7 @@ func (a *Server) generateUserCert(req certRequest) (*proto.Certs, error) {
 		PublicUserKey:         req.publicKey,
 		Username:              req.user.GetName(),
 		Impersonator:          req.impersonator,
-		AllowedLogins:         allowedLogins,
+		AllowedLogins:         append(allowedLogins, "-teleport-internal-join"),
 		TTL:                   sessionTTL,
 		Roles:                 req.checker.RoleNames(),
 		CertificateFormat:     certificateFormat,

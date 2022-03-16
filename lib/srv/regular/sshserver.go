@@ -1431,6 +1431,8 @@ func (s *Server) dispatch(ch ssh.Channel, req *ssh.Request, ctx *srv.ServerConte
 			return s.termHandlers.HandleWinChange(ch, req, ctx)
 		case teleport.ForceTerminateRequest:
 			return s.termHandlers.HandleForceTerminate(ch, req, ctx)
+		case sshutils.EnvRequest:
+			return s.handleEnv(ch, req, ctx)
 		case sshutils.SubsystemRequest:
 			return s.handleSubsystem(ch, req, ctx)
 		default:

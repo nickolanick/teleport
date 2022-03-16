@@ -1479,12 +1479,6 @@ func (s *session) checkIfStart() (bool, auth.PolicyOptions, error) {
 
 // addParty is called when a new party joins the session.
 func (s *session) addParty(p *party, mode types.SessionParticipantMode) error {
-	if s.login != p.login {
-		return trace.AccessDenied(
-			"can't switch users from %v to %v for session %v",
-			s.login, p.login, s.id)
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
