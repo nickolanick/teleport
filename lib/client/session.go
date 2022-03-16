@@ -117,11 +117,6 @@ func newSession(client *NodeClient,
 		env = make(map[string]string)
 	}
 
-	terminalSize, err := client.GetRemoteTerminalSize(joinSession.GetSessionID())
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
 	ns := &NodeSession{
 		env:                   env,
 		nodeClient:            client,
@@ -134,7 +129,13 @@ func newSession(client *NodeClient,
 	// if we're joining an existing session, we need to assume that session's
 	// existing/current terminal size:
 	if joinSession != nil {
-		ns.id = session.ID(joinSession.GetSessionID())
+		sessionID := joinSession.GetSessionID()
+		terminalSize, err := client.GetRemoteTerminalSize(sessionID)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+
+		ns.id = session.ID(sessionID)
 		ns.namespace = joinSession.GetMetadata().Namespace
 
 		if ns.terminal.IsAttached() {
