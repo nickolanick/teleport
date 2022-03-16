@@ -1432,7 +1432,8 @@ func (s *Server) dispatch(ch ssh.Channel, req *ssh.Request, ctx *srv.ServerConte
 		case teleport.ForceTerminateRequest:
 			return s.termHandlers.HandleForceTerminate(ch, req, ctx)
 		case sshutils.EnvRequest:
-			return s.handleEnv(ch, req, ctx)
+			// We ignore all SSH setenv requests for join-only principals.
+			// SSH will send them anyway but it seems fine to silently drop them.
 		case sshutils.SubsystemRequest:
 			return s.handleSubsystem(ch, req, ctx)
 		default:
