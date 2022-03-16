@@ -1519,6 +1519,53 @@ func (tc *TeleportClient) startPortForwarding(ctx context.Context, nodeClient *N
 	}
 }
 
+func getLegacyMeta(ctx context.Context, site auth.ClientI, namespace string, sessionID session.ID, notFoundErrorMessage string) (types.SessionTracker, error) {
+	// find the session ID on the site:
+	sessions, err := site.GetSessions(namespace)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	var session *session.Session
+	for _, s := range sessions {
+		if s.ID == sessionID {
+			session = &s
+			break
+		}
+	}
+	if session == nil {
+		return nil, trace.NotFound(notFoundErrorMessage)
+	}
+
+	// pick the 1st party of the session and use his server ID to connect to
+	if len(session.Parties) == 0 {
+		return nil, trace.NotFound(notFoundErrorMessage)
+	}
+	serverID := session.Parties[0].ServerID
+
+	// find a server address by its ID
+	nodes, err := site.GetNodes(ctx, namespace)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	var node types.Server
+	for _, n := range nodes {
+		if n.GetName() == serverID {
+			node = n
+			break
+		}
+	}
+	if node == nil {
+		return nil, trace.NotFound(notFoundErrorMessage)
+	}
+	target := node.GetAddr()
+	if target == "" {
+		// address is empty, try dialing by UUID instead
+		target = fmt.Sprintf("%s:0", serverID)
+	}
+
+	return nil, nil
+}
+
 // Join connects to the existing/active SSH session
 func (tc *TeleportClient) Join(ctx context.Context, mode types.SessionParticipantMode, namespace string, sessionID session.ID, input io.Reader) (err error) {
 	if namespace == "" {
