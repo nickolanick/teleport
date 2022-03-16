@@ -1545,7 +1545,7 @@ func (tc *TeleportClient) Join(ctx context.Context, mode types.SessionParticipan
 	}
 
 	var session types.SessionTracker
-	sessions, err := tc.GetActiveSessions(ctx)
+	sessions, err := site.GetActiveSessionTrackers(ctx)
 	if err != nil {
 		return trace.Wrap(err)
 	}
