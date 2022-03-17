@@ -265,19 +265,49 @@ func (a *ServerWithRoles) GetActiveSessionTrackers(ctx context.Context) ([]types
 
 	var filteredSessions []types.SessionTracker
 
-	for _, session := range sessions {
-		evaluator := NewSessionAccessEvaluator(session.GetHostPolicySets(), session.GetSessionKind())
+	for _, sess := range sessions {
+		evaluator := NewSessionAccessEvaluator(sess.GetHostPolicySets(), sess.GetSessionKind())
 		joinerRoles, err := a.authServer.GetRoles(ctx)
 		if err != nil {
-			log.Warnf("Session %v is not allowed to joddin: %v", session.GetSessionID(), err)
+			log.Warnf("Session %v is not allowed to joddin: %v", sess.GetSessionID(), err)
 			return nil, trace.Wrap(err)
 		}
 
 		modes, err := evaluator.CanJoin(SessionAccessContext{Roles: joinerRoles})
 		if err == nil || len(modes) > 0 {
-			filteredSessions = append(filteredSessions, session)
+			// Apply RFD 45 RBAC rules to the session if it's SSH.
+			// This is a bit of a hack. It converts to the old legacy format
+			// which we don't have all data for, luckily the fields we don't have aren't made available
+			// to the RBAC filter anyway.
+			if sess.GetKind() == types.KindSSHSession {
+				ruleCtx := &services.Context{User: a.context.User}
+				ruleCtx.SSHSession = &session.Session{
+					ID:             session.ID(sess.GetSessionID()),
+					Namespace:      "default",
+					Login:          sess.GetLogin(),
+					Created:        sess.GetCreated(),
+					LastActive:     time.Now(),
+					ServerID:       sess.GetAddress(),
+					ServerAddr:     sess.GetAddress(),
+					ServerHostname: sess.GetHostname(),
+					ClusterName:    sess.GetClusterName(),
+				}
+
+				for _, participant := range sess.GetParticipants() {
+					// We only need to fill in User here since other fields get discarded anyway.
+					ruleCtx.SSHSession.Parties = append(ruleCtx.SSHSession.Parties, session.Party{
+						User: participant.User,
+					})
+				}
+
+				if err := a.context.Checker.CheckAccessToRule(ruleCtx, "default", types.KindSSHSession, types.VerbList, true /* silent */); err != nil {
+					continue
+				}
+			}
+
+			filteredSessions = append(filteredSessions, sess)
 		} else {
-			log.Warnf("Session %v is not allowed to join: %v", session.GetSessionID(), err)
+			log.Warnf("Session %v is not allowed to join: %v", sess.GetSessionID(), err)
 		}
 	}
 	return filteredSessions, nil
