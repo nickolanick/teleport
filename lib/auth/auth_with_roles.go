@@ -300,6 +300,7 @@ func (a *ServerWithRoles) GetActiveSessionTrackers(ctx context.Context) ([]types
 					})
 				}
 
+				// Skip past it if there's a deny rule in place blocking access.
 				if err := a.context.Checker.CheckAccessToRule(ruleCtx, "default", types.KindSSHSession, types.VerbList, true /* silent */); err != nil {
 					continue
 				}
