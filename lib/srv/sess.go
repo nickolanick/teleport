@@ -867,7 +867,12 @@ func (s *session) launch(ctx *ServerContext) error {
 		defer s.term.AddParty(-1)
 
 		_, err := io.Copy(s.io, s.term.PTY())
-		s.log.Debugf("Copying from PTY to writer completed with error %v.", err)
+		if err != nil {
+			s.log.WithError(err).Debug("Encountered a fatal error Copying from PTY to writer")
+			// TODO: The session should be closed and the session upload should succefully be uploaded.
+		} else {
+			s.log.Debug("Copying from PTY to writer completed successfully")
+		}
 
 		// once everything has been copied, notify the goroutine below. if this code
 		// is running in a teleport node, when the exec.Cmd is done it will close
@@ -1527,7 +1532,7 @@ func (s *session) addParty(p *party, mode types.SessionParticipantMode) error {
 			defer s.term.AddParty(-1)
 			_, err := io.Copy(s.inWriter, p)
 			if err != nil {
-				s.log.Errorf("Party member %v left session %v due an error: %v", p.id, s.id, err)
+				s.log.Errorf("Party member %v left session %v due to an error: %v", p.id, s.id, err)
 			}
 			s.log.Infof("Party member %v left session %v.", p.id, s.id)
 
