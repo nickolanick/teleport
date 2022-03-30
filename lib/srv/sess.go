@@ -210,6 +210,25 @@ func (s *SessionRegistry) OpenSession(ch ssh.Channel, req *ssh.Request, ctx *Ser
 
 		return nil
 	}
+
+	if ctx.srv.GetCreateHostUser() &&
+		ctx.Identity.RoleSet.CreateHostUser(s.srv.GetInfo()) {
+		mgmt, err := NewUserManagement()
+		if err != nil {
+			return trace.Wrap(err)
+		}
+		userCloser, _ /* groups */, err := createTemporaryUser(mgmt,
+			ctx.Identity.Login,
+			ctx.Identity.RoleSet.HostGroups())
+
+		if err != nil && !trace.IsAlreadyExists(err) {
+			return trace.Wrap(err)
+		}
+		if userCloser != nil {
+			ctx.AddCloser(userCloser)
+		}
+	}
+
 	// session not found? need to create one. start by getting/generating an ID for it
 	sid, found := ctx.GetEnv(sshutils.SessionEnvVar)
 	if !found {
@@ -1690,7 +1709,7 @@ func (p *party) Close() (err error) {
 		close(p.termSizeC)
 		err = p.ch.Close()
 	})
-	return err
+	return trace.Wrap(err)
 }
 
 func (s *session) trackerGet() (types.SessionTracker, error) {

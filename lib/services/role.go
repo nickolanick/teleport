@@ -355,11 +355,23 @@ func ApplyTraits(r types.Role, traits map[string][]string) types.Role {
 			r.SetDatabaseLabels(condition, applyLabelsTraits(inLabels, traits))
 		}
 
+		inHostGroups := r.GetHostGroups(condition)
+		var outHostGroups []string
+		for _, group := range inHostGroups {
+			vals, err := ApplyValueTraits(group, traits)
+			if err != nil && !trace.IsNotFound(err) {
+				log.Warnf("did not apply trait to group: %v", err)
+				continue
+			}
+			outHostGroups = append(outHostGroups, vals...)
+		}
+		r.SetHostGroups(condition, outHostGroups)
+
 		options := r.GetOptions()
 		for i, ext := range options.CertExtensions {
 			vals, err := ApplyValueTraits(ext.Value, traits)
 			if err != nil && !trace.IsNotFound(err) {
-				log.Warnf("didnt applying trait to cert_extensions.value: %v", err)
+				log.Warnf("did not apply trait to cert_extensions.value: %v", err)
 				continue
 			}
 			if len(vals) != 0 {
@@ -727,6 +739,10 @@ type AccessChecker interface {
 
 	// CertificateExtensions returns the list of extensions for each role in the RoleSet
 	CertificateExtensions() []*types.CertExtension
+
+	// CreateHostUser determinse whether a user is allowed to have a
+	// temporary user provisioned for them on a node
+	CreateHostUser(s types.Server) bool
 }
 
 // FromSpec returns new RoleSet created from spec
@@ -1977,6 +1993,35 @@ func (set RoleSet) EnhancedRecordingSet() map[string]bool {
 	}
 
 	return m
+}
+
+func (set RoleSet) CreateHostUser(s types.Server) bool {
+	allowed := true
+	fmt.Println(s)
+	for _, role := range set {
+		result, _, err := MatchLabels(role.GetNodeLabels(types.Allow), s.GetAllLabels())
+		if err != nil {
+			fmt.Println(err)
+			return false
+		}
+		if !result {
+			continue
+		}
+		createHostUser := role.GetOptions().CreateHostUser
+		allowed = allowed && createHostUser != nil && createHostUser.Value
+		if !allowed {
+			return false
+		}
+	}
+	return true
+}
+
+func (set RoleSet) HostGroups() []string {
+	groups := []string{}
+	for _, role := range set {
+		groups = append(groups, role.GetHostGroups(types.Allow)...)
+	}
+	return groups
 }
 
 // certificatePriority returns the priority of the certificate format. The

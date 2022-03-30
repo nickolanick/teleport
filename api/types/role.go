@@ -157,6 +157,11 @@ type Role interface {
 	SetSessionJoinPolicies([]*SessionJoinPolicy)
 	// GetSessionPolicySet returns the RBAC policy set for a role.
 	GetSessionPolicySet() SessionTrackerPolicySet
+
+	// GetHostGroups gets the list of groups this role is put in when users are provisioned
+	GetHostGroups(RoleConditionType) []string
+	// SetHostGroups sets the list of groups this role is put in when users are provisioned
+	SetHostGroups(RoleConditionType, []string)
 }
 
 // NewRole constructs new standard V5 role.
@@ -598,6 +603,25 @@ func (r *RoleV5) SetRules(rct RoleConditionType, in []Rule) {
 		r.Spec.Allow.Rules = rcopy
 	} else {
 		r.Spec.Deny.Rules = rcopy
+	}
+}
+
+// GetGroups gets all groups for provisioned user
+func (r *RoleV5) GetHostGroups(rct RoleConditionType) []string {
+	if rct == Allow {
+		return r.Spec.Allow.HostGroups
+	}
+	return r.Spec.Deny.HostGroups
+
+}
+
+// SetHostGroups sets all groups for provisioned user
+func (r *RoleV5) SetHostGroups(rct RoleConditionType, groups []string) {
+	ncopy := utils.CopyStrings(groups)
+	if rct == Allow {
+		r.Spec.Allow.HostGroups = ncopy
+	} else {
+		r.Spec.Deny.HostGroups = ncopy
 	}
 }
 
