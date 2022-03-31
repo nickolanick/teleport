@@ -43,7 +43,7 @@ type TermManager struct {
 	mu           sync.Mutex
 	writers      map[string]io.Writer
 	readerState  map[string]bool
-	OnWriteError func(idString string, err error)
+	OnWriteError func(idString string, err error) error
 	// buffer is used to buffer writes when turned off
 	buffer []byte
 	on     bool
@@ -55,7 +55,7 @@ type TermManager struct {
 	// we only support one concurrent reader so this isn't mutex protected
 	remaining         []byte
 	readStateUpdate   *sync.Cond
-	closed            bool
+	closed            chan struct{}
 	lastWasBroadcast  bool
 	terminateNotifier chan struct{}
 }
@@ -65,14 +65,14 @@ func NewTermManager() *TermManager {
 	return &TermManager{
 		writers:           make(map[string]io.Writer),
 		readerState:       make(map[string]bool),
-		closed:            false,
+		closed:            make(chan struct{}),
 		readStateUpdate:   sync.NewCond(&sync.Mutex{}),
 		incoming:          make(chan []byte, 100),
 		terminateNotifier: make(chan struct{}, 1),
 	}
 }
 
-func (g *TermManager) writeToClients(p []byte) int {
+func (g *TermManager) writeToClients(p []byte) (int, error) {
 	g.lastWasBroadcast = false
 	g.history = truncateFront(append(g.history, p...), maxHistoryBytes)
 
@@ -84,15 +84,19 @@ func (g *TermManager) writeToClients(p []byte) int {
 				log.Warnf("Failed to write to remote terminal: %v", err)
 			}
 
+			// Let term manager decide how to handle broken party writers
 			if g.OnWriteError != nil {
-				g.OnWriteError(key, err)
+				err := g.OnWriteError(key, err)
+				if err != nil {
+					return 0, trace.Wrap(err)
+				}
 			}
 
 			delete(g.writers, key)
 		}
 	}
 
-	return len(p)
+	return len(p), nil
 }
 
 func (g *TermManager) TerminateNotifier() <-chan struct{} {
@@ -100,17 +104,17 @@ func (g *TermManager) TerminateNotifier() <-chan struct{} {
 }
 
 func (g *TermManager) Write(p []byte) (int, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	if g.on {
-		g.writeToClients(p)
-	} else {
-		// Only keep the last maxPausedHistoryBytes of stdout/stderr while the session is paused.
-		// The alternative is flushing to disk but this should be a pretty rare occurrence and shouldn't be an issue in practice.
-		g.buffer = truncateFront(append(g.buffer, p...), maxPausedHistoryBytes)
+	if g.isClosed() {
+		return 0, io.EOF
 	}
 
+	if g.on {
+		return g.writeToClients(p)
+	}
+
+	// Only keep the last maxPausedHistoryBytes of stdout/stderr while the session is paused.
+	// The alternative is flushing to disk but this should be a pretty rare occurrence and shouldn't be an issue in practice.
+	g.buffer = truncateFront(append(g.buffer, p...), maxPausedHistoryBytes)
 	return len(p), nil
 }
 
@@ -146,11 +150,17 @@ func (g *TermManager) Read(p []byte) (int, error) {
 	on := <-c
 	for {
 		if !on {
-			on = <-c
-			continue
+			select {
+			case <-g.closed:
+				return 0, io.EOF
+			case on = <-c:
+				continue
+			}
 		}
 
 		select {
+		case <-g.closed:
+			return 0, io.EOF
 		case on = <-c:
 			continue
 		case g.remaining = <-g.incoming:
@@ -164,7 +174,7 @@ func (g *TermManager) Read(p []byte) (int, error) {
 
 // writeUnconditional allows unconditional writes to the underlying writers.
 func (g *TermManager) writeUnconditional(p []byte) (int, error) {
-	return g.writeToClients(p), nil
+	return g.writeToClients(p)
 }
 
 // BroadcastMessage injects a message into the stream.
@@ -228,7 +238,7 @@ func (g *TermManager) AddReader(name string, r io.Reader) {
 				// This is the ASCII control code for CTRL+C.
 				if b == 0x03 {
 					g.mu.Lock()
-					if !g.on && !g.closed {
+					if !g.on && !g.isClosed() {
 						select {
 						case g.terminateNotifier <- struct{}{}:
 						default:
@@ -241,7 +251,7 @@ func (g *TermManager) AddReader(name string, r io.Reader) {
 
 			g.incoming <- buf[:n]
 			g.mu.Lock()
-			if g.closed || g.readerState[name] {
+			if g.isClosed() || g.readerState[name] {
 				g.mu.Unlock()
 				return
 			}
@@ -268,9 +278,18 @@ func (g *TermManager) Close() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if !g.closed {
-		g.closed = true
+	if !g.isClosed() {
+		close(g.closed)
 		close(g.terminateNotifier)
+	}
+}
+
+func (g *TermManager) isClosed() bool {
+	select {
+	case <-g.closed:
+		return true
+	default:
+		return false
 	}
 }
 
