@@ -43,7 +43,7 @@ type TermManager struct {
 	mu           sync.Mutex
 	writers      map[string]io.Writer
 	readerState  map[string]bool
-	OnWriteError func(idString string, err error) error
+	OnWriteError func(idString string, err error)
 	// buffer is used to buffer writes when turned off
 	buffer []byte
 	on     bool
@@ -86,10 +86,7 @@ func (g *TermManager) writeToClients(p []byte) (int, error) {
 
 			// Let term manager decide how to handle broken party writers
 			if g.OnWriteError != nil {
-				err := g.OnWriteError(key, err)
-				if err != nil {
-					return 0, trace.Wrap(err)
-				}
+				g.OnWriteError(key, err)
 			}
 
 			delete(g.writers, key)
@@ -104,6 +101,9 @@ func (g *TermManager) TerminateNotifier() <-chan struct{} {
 }
 
 func (g *TermManager) Write(p []byte) (int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
 	if g.isClosed() {
 		return 0, io.EOF
 	}

@@ -19,7 +19,6 @@ package srv
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -27,7 +26,6 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/sys/unix"
 
 	"github.com/google/uuid"
 	"github.com/gravitational/teleport"
@@ -331,8 +329,9 @@ func (s *SessionRegistry) ForceTerminate(ctx *ServerContext) error {
 	sess.BroadcastMessage("Forcefully terminating session...")
 	sess.term.Kill()
 
-	// TODO: sess.Stop instead?
-	s.EndSession(sess, true, apievents.UserMetadata{}, sess.exportParticipants())
+	// Stop session, it will be cleaned up in the background to ensure
+	// the session recording is uploaded.
+	sess.Stop()
 
 	return nil
 }
@@ -366,47 +365,20 @@ func (s *SessionRegistry) leaveSession(party *party) error {
 		}
 		s.log.Infof("Session %v will be garbage collected.", sess.id)
 
+		sess.emitSessionEndEvent(true, apievents.UserMetadata{User: party.user}, sess.exportParticipants())
+
 		// no more people left? Need to end the session!
-		s.EndSession(sess, true, apievents.UserMetadata{User: party.user}, sess.exportParticipants())
+		s.EndSession(sess)
 	}
 	go lingerAndDie()
 	return nil
 }
 
-func (s *SessionRegistry) EndSession(sess *session, interactive bool, userMetadata apievents.UserMetadata, participants []string) {
+func (s *SessionRegistry) EndSession(sess *session) {
 	// remove session from registry
 	s.removeSession(sess)
 
-	// Emit a session.end event for this session.
-	start, end := sess.startTime, time.Now().UTC()
-	sessionEndEvent := &apievents.SessionEnd{
-		Metadata: apievents.Metadata{
-			Type:        events.SessionEndEvent,
-			Code:        events.SessionEndCode,
-			ClusterName: sess.scx.ClusterName,
-		},
-		ServerMetadata: apievents.ServerMetadata{
-			ServerID:        sess.scx.srv.HostUUID(),
-			ServerLabels:    sess.scx.srv.GetInfo().GetAllLabels(),
-			ServerNamespace: s.srv.GetNamespace(),
-			ServerHostname:  s.srv.GetInfo().GetHostname(),
-			ServerAddr:      sess.scx.ServerConn.LocalAddr().String(),
-		},
-		SessionMetadata: apievents.SessionMetadata{
-			SessionID: string(sess.id),
-		},
-		UserMetadata:      userMetadata,
-		EnhancedRecording: sess.hasEnhancedRecording,
-		Participants:      participants,
-		Interactive:       interactive,
-		StartTime:         start,
-		EndTime:           end,
-		SessionRecording:  sess.scx.SessionRecordingConfig.GetMode(),
-	}
-	if err := sess.recorder.EmitAuditEvent(s.srv.Context(), sessionEndEvent); err != nil {
-		s.log.WithError(err).Warn("Failed to emit session end event.")
-	}
-
+	// close the session
 	sess.Close()
 
 	// Remove the session from the backend.
@@ -678,12 +650,11 @@ func newSession(id rsession.ID, r *SessionRegistry, ctx *ServerContext) (*sessio
 		displayParticipantRequirements: utils.AsBool(ctx.env[teleport.EnvSSHSessionDisplayParticipantRequirements]),
 	}
 
-	sess.io.OnWriteError = func(idString string, err error) error {
-		// If session recorder is broken, don't ignore the error.
+	sess.io.OnWriteError = func(idString string, err error) {
 		if idString == sessionRecorderID {
-			return trace.Wrap(err, "Failed to write to session recorder")
+			sess.log.Error("Failed to write to session recorder, stopping session.")
+			sess.Stop()
 		}
-		return nil
 	}
 
 	go func() {
@@ -725,6 +696,8 @@ func (s *session) Recorder() events.StreamWriter {
 	return s.recorder
 }
 
+// Stop ends the active session, forcing all clients to disconnect.
+// Resources will be freed in the background once the session is closed.
 func (s *session) Stop() {
 	s.stopOnce.Do(func() {
 		s.BroadcastMessage("Stopping session...")
@@ -741,6 +714,8 @@ func (s *session) Stop() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
+		close(s.stopC)
+
 		if s.term != nil {
 			s.term.Close()
 		}
@@ -754,7 +729,6 @@ func (s *session) Stop() {
 			s.log.Warnf("Failed to set tracker state to %v", types.SessionState_SessionStateTerminated)
 		}
 
-		close(s.stopC)
 	})
 }
 
@@ -763,23 +737,16 @@ func (s *session) Close() {
 	s.closeOnce.Do(func() {
 		s.Stop()
 
-		s.mu.Lock()
-		defer s.mu.Unlock()
+		s.BroadcastMessage("Closing session...")
+		s.log.Infof("Closing session %v.", s.id)
 
 		serverSessions.Dec()
-		// closing needs to happen asynchronously because the last client
-		// (session writer) will try to close this session, causing a deadlock
-		// because of closeOnce
-		go func() {
-			s.BroadcastMessage("Closing session...")
-			s.log.Infof("Closing session %v.", s.id)
 
-			if s.recorder != nil {
-				if err := s.recorder.Close(s.serverCtx); err != nil {
-					s.log.WithError(err).Warn("Failed to close recorder.")
-				}
+		if s.recorder != nil {
+			if err := s.recorder.Close(s.serverCtx); err != nil {
+				s.log.WithError(err).Warn("Failed to close recorder.")
 			}
-		}()
+		}
 	})
 }
 
@@ -824,6 +791,38 @@ func (s *session) BroadcastMessage(format string, args ...interface{}) {
 		if err != nil {
 			s.log.Debugf("Failed to broadcast message: %v", err)
 		}
+	}
+}
+
+func (s *session) emitSessionEndEvent(interactive bool, userMetadata apievents.UserMetadata, participants []string) {
+	start, end := s.startTime, time.Now().UTC()
+	sessionEndEvent := &apievents.SessionEnd{
+		Metadata: apievents.Metadata{
+			Type:        events.SessionEndEvent,
+			Code:        events.SessionEndCode,
+			ClusterName: s.scx.ClusterName,
+		},
+		ServerMetadata: apievents.ServerMetadata{
+			ServerID:        s.scx.srv.HostUUID(),
+			ServerLabels:    s.scx.srv.GetInfo().GetAllLabels(),
+			ServerNamespace: s.getNamespace(),
+			ServerHostname:  s.getHostname(),
+			ServerAddr:      s.scx.ServerConn.LocalAddr().String(),
+		},
+		SessionMetadata: apievents.SessionMetadata{
+			SessionID: string(s.id),
+		},
+		UserMetadata:      userMetadata,
+		EnhancedRecording: s.hasEnhancedRecording,
+		Participants:      participants,
+		Interactive:       interactive,
+		StartTime:         start,
+		EndTime:           end,
+		SessionRecording:  s.scx.SessionRecordingConfig.GetMode(),
+	}
+
+	if err := s.recorder.EmitAuditEvent(s.serverCtx, sessionEndEvent); err != nil {
+		s.log.WithError(err).Warn("Failed to emit session end event.")
 	}
 }
 
@@ -876,6 +875,7 @@ func (s *session) launch(ctx *ServerContext) error {
 	s.term.AddParty(1)
 	go func() {
 		defer s.term.AddParty(-1)
+
 		// once everything has been copied, notify the goroutine below. if this code
 		// is running in a teleport node, when the exec.Cmd is done it will close
 		// the PTY, allowing io.Copy to return. if this is a teleport forwarding
@@ -884,21 +884,24 @@ func (s *session) launch(ctx *ServerContext) error {
 		defer close(s.doneCh)
 
 		_, err := io.Copy(s.io, s.term.PTY())
-		// When a session ends successfully, we expect to get
-		// "read /dev/ptmx: input/output error" from the pty.
-		if err != nil && !errors.Is(err, unix.EIO) {
-			s.log.WithError(err).Error("Encountered an error while Copying from PTY to writer, stopping session.")
+		if err != nil {
+			// Make sure the session doesn't continue with a broken io copy loop.
 			s.Stop()
-			return
 		}
 
-		s.log.Debug("Copying from PTY to writer completed successfully")
+		s.log.Debugf("Copying from PTY to writer completed with error %v.", err)
 	}()
 
 	s.term.AddParty(1)
 	go func() {
 		defer s.term.AddParty(-1)
+
 		_, err := io.Copy(s.term.PTY(), s.io)
+		if err != nil {
+			// Make sure the session doesn't continue with a broken io copy loop.
+			s.Stop()
+		}
+
 		s.log.Debugf("Copying from reader to PTY completed with error %v.", err)
 	}()
 
@@ -1199,39 +1202,8 @@ func (s *session) startExec(channel ssh.Channel, ctx *ServerContext) error {
 			ctx.Errorf("Failed to close enhanced recording (exec) session: %v: %v.", s.id, err)
 		}
 
-		// Emit a session.end event for this (exec) session.
-		start, end := s.startTime, time.Now().UTC()
-		sessionEndEvent := &apievents.SessionEnd{
-			Metadata: apievents.Metadata{
-				Type:        events.SessionEndEvent,
-				Code:        events.SessionEndCode,
-				ClusterName: s.scx.ClusterName,
-			},
-			ServerMetadata: apievents.ServerMetadata{
-				ServerID:        s.scx.srv.HostUUID(),
-				ServerLabels:    s.scx.srv.GetInfo().GetAllLabels(),
-				ServerNamespace: s.scx.srv.GetNamespace(),
-				ServerHostname:  s.scx.srv.GetInfo().GetHostname(),
-				ServerAddr:      s.scx.ServerConn.LocalAddr().String(),
-			},
-			SessionMetadata: apievents.SessionMetadata{
-				SessionID: string(s.id),
-			},
-			UserMetadata:      s.scx.Identity.GetUserMetadata(),
-			EnhancedRecording: s.hasEnhancedRecording,
-			Interactive:       false,
-			Participants: []string{
-				s.scx.Identity.TeleportUser,
-			},
-			StartTime:        start,
-			EndTime:          end,
-			SessionRecording: s.scx.SessionRecordingConfig.GetMode(),
-		}
-		if err := s.recorder.EmitAuditEvent(s.scx.srv.Context(), sessionEndEvent); err != nil {
-			s.log.WithError(err).Warn("Failed to emit session end event.")
-		}
-
-		s.registry.EndSession(s, false, s.scx.Identity.GetUserMetadata(), []string{s.scx.Identity.TeleportUser})
+		s.emitSessionEndEvent(false, s.scx.Identity.GetUserMetadata(), []string{s.scx.Identity.TeleportUser})
+		s.registry.EndSession(s)
 	}()
 
 	return nil
@@ -1338,6 +1310,10 @@ func (s *session) SetLingerTTL(ttl time.Duration) {
 
 func (s *session) getNamespace() string {
 	return s.registry.srv.GetNamespace()
+}
+
+func (s *session) getHostname() string {
+	return s.registry.srv.GetInfo().GetHostname()
 }
 
 // exportPartyMembers exports participants in the in-memory map of party
@@ -1685,7 +1661,7 @@ func (p *party) Close() (err error) {
 		close(p.termSizeC)
 		err = p.ch.Close()
 	})
-	return err
+	return trace.Wrap(err)
 }
 
 func (s *session) trackerGet() (types.SessionTracker, error) {

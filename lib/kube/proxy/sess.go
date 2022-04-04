@@ -462,7 +462,9 @@ func (s *session) launch() error {
 	s.BroadcastMessage("Connecting to %v over K8S", s.podName)
 
 	eventPodMeta := request.eventPodMeta(request.context, s.sess.creds)
-	s.io.OnWriteError = func(idString string, err error) error {
+	s.io.OnWriteError = func(idString string, err error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		s.log.Errorf("Encountered error: %v with party %v. Disconnecting them from the session.", err, idString)
 		id, _ := uuid.Parse(idString)
 		if s.parties[id] != nil {
@@ -471,7 +473,6 @@ func (s *session) launch() error {
 				s.log.Errorf("Failed to disconnect party %v from the session: %v.", idString, err)
 			}
 		}
-		return nil
 	}
 
 	onFinished, err := s.lockedSetupLaunch(request, q, eventPodMeta)
