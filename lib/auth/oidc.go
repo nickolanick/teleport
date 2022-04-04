@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/api/constants"
@@ -78,34 +79,21 @@ func (a *Server) createOIDCClient(conn types.OIDCConnector) (*oidc.Client, error
 		return nil, trace.Wrap(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), defaults.WebHeadersTimeout)
-	defer cancel()
-
+	doneSyncing := make(chan struct{})
 	go func() {
-		defer cancel()
+		defer close(doneSyncing)
 		client.SyncProviderConfig(conn.GetIssuerURL())
 	}()
 
 	select {
-	case <-ctx.Done():
+	case <-doneSyncing:
+	case <-time.After(defaults.WebHeadersTimeout):
+		return nil, trace.ConnectionProblem(nil,
+			"timed out syncing oidc connector %v, "+
+				"ensure URL %q is valid and accessible and check configuration",
+			conn.GetName(), conn.GetIssuerURL())
 	case <-a.closeCtx.Done():
 		return nil, trace.ConnectionProblem(nil, "auth server is shutting down")
-	}
-
-	// Canceled is expected in case if sync provider config finishes faster
-	// than the deadline
-	if ctx.Err() != nil && ctx.Err() != context.Canceled {
-		var err error
-		if ctx.Err() == context.DeadlineExceeded {
-			err = trace.ConnectionProblem(err,
-				"failed to reach out to oidc connector %v, most likely URL %q is not valid or not accessible, check configuration and try to re-create the connector",
-				conn.GetName(), conn.GetIssuerURL())
-		} else {
-			err = trace.ConnectionProblem(err,
-				"unknown problem with connector %v, most likely URL %q is not valid or not accessible, check configuration and try to re-create the connector",
-				conn.GetName(), conn.GetIssuerURL())
-		}
-		return nil, err
 	}
 
 	a.lock.Lock()
