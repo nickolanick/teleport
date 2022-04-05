@@ -18,6 +18,7 @@ package auth
 
 import (
 	"context"
+	"crypto"
 	"time"
 
 	"github.com/gravitational/teleport"
@@ -25,6 +26,7 @@ import (
 	apidefaults "github.com/gravitational/teleport/api/defaults"
 	"github.com/gravitational/teleport/api/types"
 	"github.com/gravitational/teleport/api/utils"
+	"github.com/gravitational/teleport/lib/auth/keystore"
 	"github.com/gravitational/teleport/lib/modules"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/tlsca"
@@ -50,7 +52,7 @@ func (s *Server) GenerateDatabaseCert(ctx context.Context, req *proto.DatabaseCe
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	caCert, signer, err := s.GetKeyStore().GetTLSCertAndSigner(hostCA)
+	caCert, signer, err := getCaAndSigner(s.GetKeyStore(), hostCA, req)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -76,6 +78,17 @@ func (s *Server) GenerateDatabaseCert(ctx context.Context, req *proto.DatabaseCe
 		Cert:    cert,
 		CACerts: services.GetTLSCerts(hostCA),
 	}, nil
+}
+
+// getCaAndSigner returns correct signer and CA that should be used when generating database certificate.
+// This function covers the database CA rotation scenario when on rotation init phase additional/new TLS
+// key should be used to sign the database CA. Otherwise, the trust chain will break on update_clients.
+func getCaAndSigner(keyStore keystore.KeyStore, databaseCA types.CertAuthority, req *proto.DatabaseCertRequest) ([]byte, crypto.Signer, error) {
+	if req.KeysGeneration && databaseCA.GetRotation().Phase == types.RotationPhaseInit {
+		return keyStore.GetAdditionalTrustedTLSCertAndSigner(databaseCA)
+	}
+
+	return keyStore.GetTLSCertAndSigner(databaseCA)
 }
 
 // getServerNames returns deduplicated list of server names from signing request.
