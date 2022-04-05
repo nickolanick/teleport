@@ -5,9 +5,11 @@ layout: tocless-doc
 ---
 
 <ul>
+  <ScopedBlock scope={["oss", "enterprise"]}>
   <li>
   [Scaling](./operations/scaling.mdx). How to configure Teleport for large-scale deployments.
   </li>
+  </ScopedBlock>
   <li>
   [Upgrading](./operations/upgrading.mdx). Learn about components version compatibility and upgrade sequence.
   </li>
@@ -17,7 +19,9 @@ layout: tocless-doc
   <li>
   [CA Rotation](./operations/ca-rotation.mdx). Rotating certificates and certificate authorities.
   </li>
+  <ScopedBlock scope={["oss", "enterprise"]}>
   <li>
   [TLS Routing Migration](./operations/tls-routing.mdx). Migrating to single-port TLS routing Teleport mode.
   </li>
+  </ScopedBlock>
 </ul>
