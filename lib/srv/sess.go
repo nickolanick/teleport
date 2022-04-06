@@ -131,58 +131,6 @@ func (s *SessionRegistry) Close() {
 	s.log.Debug("Closing Session Registry.")
 }
 
-// emitSessionJoinEvent emits a session join event to both the Audit Log as
-// well as sending a "x-teleport-event" global request on the SSH connection.
-func (s *SessionRegistry) emitSessionJoinEvent(ctx *ServerContext) {
-	sessionJoinEvent := &apievents.SessionJoin{
-		Metadata: apievents.Metadata{
-			Type:        events.SessionJoinEvent,
-			Code:        events.SessionJoinCode,
-			ClusterName: ctx.ClusterName,
-		},
-		ServerMetadata: apievents.ServerMetadata{
-			ServerID:        ctx.srv.HostUUID(),
-			ServerLabels:    ctx.srv.GetInfo().GetAllLabels(),
-			ServerNamespace: s.srv.GetNamespace(),
-			ServerHostname:  s.srv.GetInfo().GetHostname(),
-			ServerAddr:      ctx.ServerConn.LocalAddr().String(),
-		},
-		SessionMetadata: apievents.SessionMetadata{
-			SessionID: string(ctx.SessionID()),
-		},
-		UserMetadata: ctx.Identity.GetUserMetadata(),
-		ConnectionMetadata: apievents.ConnectionMetadata{
-			RemoteAddr: ctx.ServerConn.RemoteAddr().String(),
-		},
-	}
-	// Local address only makes sense for non-tunnel nodes.
-	if !ctx.srv.UseTunnel() {
-		sessionJoinEvent.ConnectionMetadata.LocalAddr = ctx.ServerConn.LocalAddr().String()
-	}
-
-	// Emit session join event to Audit Log.
-	session := ctx.getSession()
-	if err := session.recorder.EmitAuditEvent(ctx.srv.Context(), sessionJoinEvent); err != nil {
-		s.log.WithError(err).Warn("Failed to emit session join event.")
-	}
-
-	// Notify all members of the party that a new member has joined over the
-	// "x-teleport-event" channel.
-	for _, p := range session.getParties() {
-		eventPayload, err := json.Marshal(sessionJoinEvent)
-		if err != nil {
-			s.log.Warnf("Unable to marshal %v for %v: %v.", events.SessionJoinEvent, p.sconn.RemoteAddr(), err)
-			continue
-		}
-		_, _, err = p.sconn.SendRequest(teleport.SessionEvent, false, eventPayload)
-		if err != nil {
-			s.log.Warnf("Unable to send %v to %v: %v.", events.SessionJoinEvent, p.sconn.RemoteAddr(), err)
-			continue
-		}
-		s.log.Debugf("Sent %v to %v.", events.SessionJoinEvent, p.sconn.RemoteAddr())
-	}
-}
-
 // OpenSession either joins an existing session or starts a new session.
 func (s *SessionRegistry) OpenSession(ch ssh.Channel, req *ssh.Request, ctx *ServerContext) error {
 	session := ctx.getSession()
@@ -205,10 +153,6 @@ func (s *SessionRegistry) OpenSession(ch ssh.Channel, req *ssh.Request, ctx *Ser
 		if err != nil {
 			return trace.Wrap(err)
 		}
-
-		// Emit session join event to both the Audit Log as well as over the
-		// "x-teleport-event" channel in the SSH connection.
-		s.emitSessionJoinEvent(ctx)
 
 		return nil
 	}
@@ -264,58 +208,12 @@ func (s *SessionRegistry) OpenExecSession(channel ssh.Channel, req *ssh.Request,
 	// occurs, otherwise it will be closed by the callee.
 	ctx.setSession(sess)
 	err = sess.startExec(channel, ctx)
-	defer sess.Close()
 	if err != nil {
+		sess.Close()
 		return trace.Wrap(err)
 	}
 
 	return nil
-}
-
-// emitSessionLeaveEvent emits a session leave event to both the Audit Log as
-// well as sending a "x-teleport-event" global request on the SSH connection.
-func (s *SessionRegistry) emitSessionLeaveEvent(party *party) {
-	sessionLeaveEvent := &apievents.SessionLeave{
-		Metadata: apievents.Metadata{
-			Type:        events.SessionLeaveEvent,
-			Code:        events.SessionLeaveCode,
-			ClusterName: party.ctx.ClusterName,
-		},
-		ServerMetadata: apievents.ServerMetadata{
-			ServerID:        party.ctx.srv.HostUUID(),
-			ServerLabels:    party.ctx.srv.GetInfo().GetAllLabels(),
-			ServerNamespace: s.srv.GetNamespace(),
-			ServerHostname:  s.srv.GetInfo().GetHostname(),
-			ServerAddr:      party.ctx.ServerConn.LocalAddr().String(),
-		},
-		SessionMetadata: apievents.SessionMetadata{
-			SessionID: party.s.ID(),
-		},
-		UserMetadata: apievents.UserMetadata{
-			User: party.user,
-		},
-	}
-
-	// Emit session leave event to Audit Log.
-	if err := party.s.recorder.EmitAuditEvent(s.srv.Context(), sessionLeaveEvent); err != nil {
-		s.log.WithError(err).Warn("Failed to emit session leave event.")
-	}
-
-	// Notify all members of the party that a new member has left over the
-	// "x-teleport-event" channel.
-	for _, p := range party.s.getParties() {
-		eventPayload, err := utils.FastMarshal(sessionLeaveEvent)
-		if err != nil {
-			s.log.Warnf("Unable to marshal %v for %v: %v.", events.SessionLeaveEvent, p.sconn.RemoteAddr(), err)
-			continue
-		}
-		_, _, err = p.sconn.SendRequest(teleport.SessionEvent, false, eventPayload)
-		if err != nil {
-			s.log.Warnf("Unable to send %v to %v: %v.", events.SessionLeaveEvent, p.sconn.RemoteAddr(), err)
-			continue
-		}
-		s.log.Debugf("Sent %v to %v.", events.SessionLeaveEvent, p.sconn.RemoteAddr())
-	}
 }
 
 func (s *SessionRegistry) ForceTerminate(ctx *ServerContext) error {
@@ -325,9 +223,7 @@ func (s *SessionRegistry) ForceTerminate(ctx *ServerContext) error {
 		return nil
 	}
 
-	sess.terminated = true
 	sess.BroadcastMessage("Forcefully terminating session...")
-	sess.term.Kill()
 
 	// Stop session, it will be cleaned up in the background to ensure
 	// the session recording is uploaded.
@@ -347,49 +243,17 @@ func (s *SessionRegistry) leaveSession(party *party) error {
 
 	// Emit session leave event to both the Audit Log as well as over the
 	// "x-teleport-event" channel in the SSH connection.
-	s.emitSessionLeaveEvent(party)
+	sess.emitSessionLeaveEvent(party.ctx)
 
-	// this goroutine runs for a short amount of time only after a session
-	// becomes empty (no parties). It allows session to "linger" for a bit
-	// allowing parties to reconnect if they lost connection momentarily
-	lingerAndDie := func() {
-		lingerTTL := sess.GetLingerTTL()
-		if lingerTTL > 0 {
-			time.Sleep(lingerTTL)
-		}
-		// not lingering anymore? someone reconnected? cool then... no need
-		// to die...
-		if !sess.isLingering() {
-			s.log.Infof("Session %v has become active again.", sess.id)
-			return
-		}
-		s.log.Infof("Session %v will be garbage collected.", sess.id)
-
-		sess.emitSessionEndEvent(true, apievents.UserMetadata{User: party.user}, sess.exportParticipants())
-
-		// no more people left? Need to end the session!
-		s.EndSession(sess)
-	}
-	go lingerAndDie()
 	return nil
 }
 
-func (s *SessionRegistry) EndSession(sess *session) {
-	// remove session from registry
-	s.removeSession(sess)
+func (s *SessionRegistry) EndSession(sess *session, ctx *ServerContext) {
+	// emit session end event
+	sess.emitSessionEndEvent(ctx)
 
 	// close the session
 	sess.Close()
-
-	// Remove the session from the backend.
-	if s.srv.GetSessionServer() != nil {
-		err := s.srv.GetSessionServer().DeleteSession(s.srv.GetNamespace(), sess.id)
-		if err != nil {
-			s.log.Errorf("Failed to remove active session: %v: %v. "+
-				"Access to backend may be degraded, check connectivity to backend.",
-				sess.id, err)
-		}
-	}
 }
 
 // NotifyWinChange is called to notify all members in the party that the PTY
@@ -528,8 +392,6 @@ type session struct {
 
 	closeOnce sync.Once
 
-	stopOnce sync.Once
-
 	recorder events.StreamWriter
 
 	// hasEnhancedRecording returns true if this session has enhanced session
@@ -550,8 +412,6 @@ type session struct {
 	scx *ServerContext
 
 	presenceEnabled bool
-
-	terminated bool
 
 	started bool
 
@@ -696,43 +556,48 @@ func (s *session) Recorder() events.StreamWriter {
 	return s.recorder
 }
 
-// Stop ends the active session, forcing all clients to disconnect.
-// Resources will be freed in the background once the session is closed.
+// Stop kills the active session, forcing all clients to disconnect.
 func (s *session) Stop() {
-	s.stopOnce.Do(func() {
-		s.BroadcastMessage("Stopping session...")
-		s.log.Infof("Stopping session %v.", s.id)
+	s.mu.Lock()
+	select {
+	case <-s.stopC:
+		return
+	default:
+		// triggers term.Kill for interactive sessions
+		close(s.stopC)
+	}
+	s.mu.Unlock()
 
-		// Can't close parties under lock because it deadlocks
-		for _, p := range s.parties {
+	s.BroadcastMessage("Stopping session...")
+	s.log.Infof("Stopping session %v.", s.id)
+
+	if s.term != nil {
+		s.term.Close()
+	}
+
+	// Close io copy loops
+	s.io.Close()
+
+	// Running p.Close under session lock would cause a deadlock,
+	// so we close parties in the background.
+	go func() {
+		for _, p := range s.getParties() {
 			err := p.Close()
 			if err != nil {
 				s.log.WithError(err).Errorf("Failed to close party.")
 			}
 		}
+	}()
 
-		s.mu.Lock()
-		defer s.mu.Unlock()
-
-		close(s.stopC)
-
-		if s.term != nil {
-			s.term.Close()
-		}
-
-		s.io.Close()
-
-		s.state = types.SessionState_SessionStateTerminated
-		s.stateUpdate.Broadcast()
-		err := s.trackerUpdateState(types.SessionState_SessionStateTerminated)
-		if err != nil {
-			s.log.Warnf("Failed to set tracker state to %v", types.SessionState_SessionStateTerminated)
-		}
-
-	})
+	s.state = types.SessionState_SessionStateTerminated
+	s.stateUpdate.Broadcast()
+	err := s.trackerUpdateState(types.SessionState_SessionStateTerminated)
+	if err != nil {
+		s.log.Warnf("Failed to set tracker state to %v", types.SessionState_SessionStateTerminated)
+	}
 }
 
-// Close ends the active session forcing all clients to disconnect and freeing all resources
+// Close ends the active session freeing all resources.
 func (s *session) Close() {
 	s.closeOnce.Do(func() {
 		s.Stop()
@@ -742,21 +607,26 @@ func (s *session) Close() {
 
 		serverSessions.Dec()
 
+		// remove session from registry
+		s.registry.removeSession(s)
+
+		// Remove the session from the backend.
+		if s.scx.srv.GetSessionServer() != nil {
+			err := s.scx.srv.GetSessionServer().DeleteSession(s.getNamespace(), s.id)
+			if err != nil {
+				s.log.Errorf("Failed to remove active session: %v: %v. "+
+					"Access to backend may be degraded, check connectivity to backend.",
+					s.id, err)
+			}
+		}
+
+		// Close the session recorder
 		if s.recorder != nil {
 			if err := s.recorder.Close(s.serverCtx); err != nil {
 				s.log.WithError(err).Warn("Failed to close recorder.")
 			}
 		}
 	})
-}
-
-// isLingering returns true if every party has left this session. Occurs
-// under a lock.
-func (s *session) isLingering() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return len(s.parties) == 0 && !s.terminated
 }
 
 func (s *session) waitOnAccess() error {
@@ -794,34 +664,170 @@ func (s *session) BroadcastMessage(format string, args ...interface{}) {
 	}
 }
 
-func (s *session) emitSessionEndEvent(interactive bool, userMetadata apievents.UserMetadata, participants []string) {
+func (s *session) emitSessionStartEvent(ctx *ServerContext) {
+	sessionStartEvent := &apievents.SessionStart{
+		Metadata: apievents.Metadata{
+			Type:        events.SessionStartEvent,
+			Code:        events.SessionStartCode,
+			ClusterName: ctx.ClusterName,
+			ID:          uuid.New().String(),
+		},
+		ServerMetadata: apievents.ServerMetadata{
+			ServerID:        ctx.srv.HostUUID(),
+			ServerLabels:    ctx.srv.GetInfo().GetAllLabels(),
+			ServerHostname:  ctx.srv.GetInfo().GetHostname(),
+			ServerAddr:      ctx.ServerConn.LocalAddr().String(),
+			ServerNamespace: ctx.srv.GetNamespace(),
+		},
+		SessionMetadata: apievents.SessionMetadata{
+			SessionID: string(s.id),
+		},
+		UserMetadata: ctx.Identity.GetUserMetadata(),
+		ConnectionMetadata: apievents.ConnectionMetadata{
+			RemoteAddr: ctx.ServerConn.RemoteAddr().String(),
+		},
+		SessionRecording: ctx.SessionRecordingConfig.GetMode(),
+	}
+
+	if s.term != nil {
+		params := s.term.GetTerminalParams()
+		sessionStartEvent.TerminalSize = params.Serialize()
+	}
+
+	// Local address only makes sense for non-tunnel nodes.
+	if !ctx.srv.UseTunnel() {
+		sessionStartEvent.ConnectionMetadata.LocalAddr = ctx.ServerConn.LocalAddr().String()
+	}
+
+	if err := s.recorder.EmitAuditEvent(ctx.srv.Context(), sessionStartEvent); err != nil {
+		s.log.WithError(err).Warn("Failed to emit session start event.")
+	}
+}
+
+// emitSessionJoinEvent emits a session join event to both the Audit Log as
+// well as sending a "x-teleport-event" global request on the SSH connection.
+func (s *session) emitSessionJoinEvent(ctx *ServerContext) {
+	sessionJoinEvent := &apievents.SessionJoin{
+		Metadata: apievents.Metadata{
+			Type:        events.SessionJoinEvent,
+			Code:        events.SessionJoinCode,
+			ClusterName: ctx.ClusterName,
+		},
+		ServerMetadata: apievents.ServerMetadata{
+			ServerID:        ctx.srv.HostUUID(),
+			ServerLabels:    ctx.srv.GetInfo().GetAllLabels(),
+			ServerNamespace: s.getNamespace(),
+			ServerHostname:  s.getHostname(),
+			ServerAddr:      ctx.ServerConn.LocalAddr().String(),
+		},
+		SessionMetadata: apievents.SessionMetadata{
+			SessionID: string(ctx.SessionID()),
+		},
+		UserMetadata: ctx.Identity.GetUserMetadata(),
+		ConnectionMetadata: apievents.ConnectionMetadata{
+			RemoteAddr: ctx.ServerConn.RemoteAddr().String(),
+		},
+	}
+	// Local address only makes sense for non-tunnel nodes.
+	if !ctx.srv.UseTunnel() {
+		sessionJoinEvent.ConnectionMetadata.LocalAddr = ctx.ServerConn.LocalAddr().String()
+	}
+
+	// Emit session join event to Audit Log.
+	session := ctx.getSession()
+	if err := session.recorder.EmitAuditEvent(ctx.srv.Context(), sessionJoinEvent); err != nil {
+		s.log.WithError(err).Warn("Failed to emit session join event.")
+	}
+
+	// Notify all members of the party that a new member has joined over the
+	// "x-teleport-event" channel.
+	for _, p := range session.getParties() {
+		eventPayload, err := json.Marshal(sessionJoinEvent)
+		if err != nil {
+			s.log.Warnf("Unable to marshal %v for %v: %v.", events.SessionJoinEvent, p.sconn.RemoteAddr(), err)
+			continue
+		}
+		_, _, err = p.sconn.SendRequest(teleport.SessionEvent, false, eventPayload)
+		if err != nil {
+			s.log.Warnf("Unable to send %v to %v: %v.", events.SessionJoinEvent, p.sconn.RemoteAddr(), err)
+			continue
+		}
+		s.log.Debugf("Sent %v to %v.", events.SessionJoinEvent, p.sconn.RemoteAddr())
+	}
+}
+
+// emitSessionLeaveEvent emits a session leave event to both the Audit Log as
+// well as sending a "x-teleport-event" global request on the SSH connection.
+func (s *session) emitSessionLeaveEvent(ctx *ServerContext) {
+	sessionLeaveEvent := &apievents.SessionLeave{
+		Metadata: apievents.Metadata{
+			Type:        events.SessionLeaveEvent,
+			Code:        events.SessionLeaveCode,
+			ClusterName: ctx.ClusterName,
+		},
+		ServerMetadata: apievents.ServerMetadata{
+			ServerID:        ctx.srv.HostUUID(),
+			ServerLabels:    ctx.srv.GetInfo().GetAllLabels(),
+			ServerNamespace: s.getNamespace(),
+			ServerHostname:  s.getHostname(),
+			ServerAddr:      ctx.ServerConn.LocalAddr().String(),
+		},
+		SessionMetadata: apievents.SessionMetadata{
+			SessionID: string(s.id),
+		},
+		UserMetadata: ctx.Identity.GetUserMetadata(),
+	}
+
+	// Emit session leave event to Audit Log.
+	if err := s.recorder.EmitAuditEvent(ctx.srv.Context(), sessionLeaveEvent); err != nil {
+		s.log.WithError(err).Warn("Failed to emit session leave event.")
+	}
+
+	// Notify all members of the party that a new member has left over the
+	// "x-teleport-event" channel.
+	for _, p := range s.getParties() {
+		eventPayload, err := utils.FastMarshal(sessionLeaveEvent)
+		if err != nil {
+			s.log.Warnf("Unable to marshal %v for %v: %v.", events.SessionLeaveEvent, p.sconn.RemoteAddr(), err)
+			continue
+		}
+		_, _, err = p.sconn.SendRequest(teleport.SessionEvent, false, eventPayload)
+		if err != nil {
+			s.log.Warnf("Unable to send %v to %v: %v.", events.SessionLeaveEvent, p.sconn.RemoteAddr(), err)
+			continue
+		}
+		s.log.Debugf("Sent %v to %v.", events.SessionLeaveEvent, p.sconn.RemoteAddr())
+	}
+}
+
+func (s *session) emitSessionEndEvent(ctx *ServerContext) {
 	start, end := s.startTime, time.Now().UTC()
 	sessionEndEvent := &apievents.SessionEnd{
 		Metadata: apievents.Metadata{
 			Type:        events.SessionEndEvent,
 			Code:        events.SessionEndCode,
-			ClusterName: s.scx.ClusterName,
+			ClusterName: ctx.ClusterName,
 		},
 		ServerMetadata: apievents.ServerMetadata{
-			ServerID:        s.scx.srv.HostUUID(),
-			ServerLabels:    s.scx.srv.GetInfo().GetAllLabels(),
+			ServerID:        ctx.srv.HostUUID(),
+			ServerLabels:    ctx.srv.GetInfo().GetAllLabels(),
 			ServerNamespace: s.getNamespace(),
 			ServerHostname:  s.getHostname(),
-			ServerAddr:      s.scx.ServerConn.LocalAddr().String(),
+			ServerAddr:      ctx.ServerConn.LocalAddr().String(),
 		},
 		SessionMetadata: apievents.SessionMetadata{
 			SessionID: string(s.id),
 		},
-		UserMetadata:      userMetadata,
+		UserMetadata:      ctx.Identity.GetUserMetadata(),
+		Participants:      s.exportParticipants(),
 		EnhancedRecording: s.hasEnhancedRecording,
-		Participants:      participants,
-		Interactive:       interactive,
+		Interactive:       s.term != nil,
 		StartTime:         start,
 		EndTime:           end,
-		SessionRecording:  s.scx.SessionRecordingConfig.GetMode(),
+		SessionRecording:  ctx.SessionRecordingConfig.GetMode(),
 	}
 
-	if err := s.recorder.EmitAuditEvent(s.serverCtx, sessionEndEvent); err != nil {
+	if err := s.recorder.EmitAuditEvent(ctx.srv.Context(), sessionEndEvent); err != nil {
 		s.log.WithError(err).Warn("Failed to emit session end event.")
 	}
 }
@@ -858,8 +864,8 @@ func (s *session) launch(ctx *ServerContext) error {
 				case <-ticker.C:
 					err := s.checkPresence()
 					if err != nil {
-						s.log.WithError(err).Error("Failed to check presence, closing session as a security measure")
-						s.Close()
+						s.log.WithError(err).Error("Failed to check presence, terminating session as a security measure")
+						s.Stop()
 					}
 				case <-s.stopC:
 					break outer
@@ -985,40 +991,8 @@ func (s *session) startInteractive(ch ssh.Channel, ctx *ServerContext) error {
 		}
 	}
 
-	params := s.term.GetTerminalParams()
-	// Emit "new session created" event for the interactive session.
-	sessionStartEvent := &apievents.SessionStart{
-		Metadata: apievents.Metadata{
-			Type:        events.SessionStartEvent,
-			Code:        events.SessionStartCode,
-			ClusterName: ctx.ClusterName,
-			ID:          uuid.New().String(),
-		},
-		ServerMetadata: apievents.ServerMetadata{
-			ServerID:        ctx.srv.HostUUID(),
-			ServerLabels:    ctx.srv.GetInfo().GetAllLabels(),
-			ServerHostname:  ctx.srv.GetInfo().GetHostname(),
-			ServerAddr:      ctx.ServerConn.LocalAddr().String(),
-			ServerNamespace: ctx.srv.GetNamespace(),
-		},
-		SessionMetadata: apievents.SessionMetadata{
-			SessionID: string(s.id),
-		},
-		UserMetadata: ctx.Identity.GetUserMetadata(),
-		ConnectionMetadata: apievents.ConnectionMetadata{
-			RemoteAddr: ctx.ServerConn.RemoteAddr().String(),
-		},
-		TerminalSize:     params.Serialize(),
-		SessionRecording: ctx.SessionRecordingConfig.GetMode(),
-	}
-
-	// Local address only makes sense for non-tunnel nodes.
-	if !ctx.srv.UseTunnel() {
-		sessionStartEvent.ConnectionMetadata.LocalAddr = ctx.ServerConn.LocalAddr().String()
-	}
-	if err := s.recorder.EmitAuditEvent(ctx.srv.Context(), sessionStartEvent); err != nil {
-		s.log.WithError(err).Warn("Failed to emit session start event.")
-	}
+	// Emit a session.start event for the interactive session.
+	s.emitSessionStartEvent(ctx)
 
 	inReader, inWriter := io.Pipe()
 	s.inWriter = inWriter
@@ -1111,36 +1085,7 @@ func (s *session) startExec(channel ssh.Channel, ctx *ServerContext) error {
 	s.recorder = rec
 
 	// Emit a session.start event for the exec session.
-	sessionStartEvent := &apievents.SessionStart{
-		Metadata: apievents.Metadata{
-			Type:        events.SessionStartEvent,
-			Code:        events.SessionStartCode,
-			ClusterName: ctx.ClusterName,
-			ID:          uuid.New().String(),
-		},
-		ServerMetadata: apievents.ServerMetadata{
-			ServerID:        ctx.srv.HostUUID(),
-			ServerLabels:    ctx.srv.GetInfo().GetAllLabels(),
-			ServerHostname:  ctx.srv.GetInfo().GetHostname(),
-			ServerAddr:      ctx.ServerConn.LocalAddr().String(),
-			ServerNamespace: ctx.srv.GetNamespace(),
-		},
-		SessionMetadata: apievents.SessionMetadata{
-			SessionID: string(s.id),
-		},
-		UserMetadata: ctx.Identity.GetUserMetadata(),
-		ConnectionMetadata: apievents.ConnectionMetadata{
-			RemoteAddr: ctx.ServerConn.RemoteAddr().String(),
-		},
-		SessionRecording: ctx.SessionRecordingConfig.GetMode(),
-	}
-	// Local address only makes sense for non-tunnel nodes.
-	if !ctx.srv.UseTunnel() {
-		sessionStartEvent.ConnectionMetadata.LocalAddr = ctx.ServerConn.LocalAddr().String()
-	}
-	if err := s.recorder.EmitAuditEvent(ctx.srv.Context(), sessionStartEvent); err != nil {
-		ctx.WithError(err).Warn("Failed to emit session start event.")
-	}
+	s.emitSessionStartEvent(ctx)
 
 	// Start execution. If the program failed to start, send that result back.
 	// Note this is a partial start. Teleport will have re-exec'ed itself and
@@ -1202,8 +1147,7 @@ func (s *session) startExec(channel ssh.Channel, ctx *ServerContext) error {
 			ctx.Errorf("Failed to close enhanced recording (exec) session: %v: %v.", s.id, err)
 		}
 
-		s.emitSessionEndEvent(false, s.scx.Identity.GetUserMetadata(), []string{s.scx.Identity.TeleportUser})
-		s.registry.EndSession(s)
+		s.registry.EndSession(s, ctx)
 	}()
 
 	return nil
@@ -1293,6 +1237,13 @@ func (s *session) removeParty(p *party) error {
 
 	s.io.DeleteWriter(string(p.id))
 	s.BroadcastMessage("User %v left the session.", p.user)
+
+	// If the leaving party is the last one in the session
+	// start the lingerAndDie goroutine
+	if len(s.parties) == 0 {
+		go s.lingerAndDie(p)
+	}
+
 	return nil
 }
 
@@ -1306,6 +1257,20 @@ func (s *session) SetLingerTTL(ttl time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lingerTTL = ttl
+}
+
+// If after a short linger duration there are no active
+// parties in the session, end the session.
+func (s *session) lingerAndDie(party *party) {
+	s.log.Debugf("Session %v has no active party members.", s.id)
+	time.Sleep(s.GetLingerTTL())
+	if len(s.getParties()) != 0 {
+		s.log.Infof("Session %v has become active again.", s.id)
+		return
+	}
+
+	s.log.Infof("Session %v will be garbage collected.", s.id)
+	s.registry.EndSession(s, party.ctx)
 }
 
 func (s *session) getNamespace() string {
@@ -1340,6 +1305,12 @@ func (s *session) exportPartyMembers() []rsession.Party {
 func (s *session) exportParticipants() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// If there are 0 participants, this is an exec session.
+	// Return the user from the session context.
+	if len(s.participants) == 0 {
+		return []string{s.scx.Identity.TeleportUser}
+	}
 
 	var participants []string
 	for _, p := range s.participants {
@@ -1573,6 +1544,10 @@ func (s *session) join(ch ssh.Channel, req *ssh.Request, ctx *ServerContext, mod
 	if err := s.addParty(p, mode); err != nil {
 		return nil, trace.Wrap(err)
 	}
+
+	// Emit session join event to both the Audit Log as well as over the
+	// "x-teleport-event" channel in the SSH connection.
+	s.emitSessionJoinEvent(p.ctx)
 
 	return p, nil
 }
