@@ -1042,13 +1042,17 @@ func (a *Server) generateUserCert(req certRequest) (*proto.Certs, error) {
 		return nil, trace.Wrap(err)
 	}
 
+	// Add the special join-only principal used for joining sessions.
+	// All users have access to this and join RBAC rules are checked after the connection is established.
+	allowedLogins = append(allowedLogins, "-teleport-internal-join")
+
 	params := services.UserCertParams{
 		CASigner:              caSigner,
 		CASigningAlg:          sshutils.GetSigningAlgName(userCA),
 		PublicUserKey:         req.publicKey,
 		Username:              req.user.GetName(),
 		Impersonator:          req.impersonator,
-		AllowedLogins:         append(allowedLogins, "-teleport-internal-join"),
+		AllowedLogins:         allowedLogins,
 		TTL:                   sessionTTL,
 		Roles:                 req.checker.RoleNames(),
 		CertificateFormat:     certificateFormat,
