@@ -567,6 +567,7 @@ func (s *session) Stop() {
 		}
 	}
 
+	// Remove session parties and close client connections.
 	for _, p := range s.parties {
 		if err := s.removeParty(p); err != nil {
 			s.log.WithError(err).Errorf("Failed to close party.")
@@ -1183,15 +1184,21 @@ func (s *session) removePartyMember(party *party) {
 	delete(s.parties, party.id)
 }
 
-// removeParty removes the party from the in-memory map that holds all party members.
+// removeParty removes the party from the in-memory map that holds all party members
+// and closes their underlying ssh channels. This may also trigger the session to end
+// if the party is the last in the session or has policies that dictate it to end.
 // Occurs under session lock.
 func (s *session) removeParty(p *party) error {
 	p.ctx.Infof("Removing party %v from session %v", p, s.id)
 
+	// Close the party's ssh channel
 	p.Close()
 
 	// Removes participant from in-memory map of party members.
 	s.removePartyMember(p)
+
+	// Remove party for the term writer
+	s.io.DeleteWriter(string(p.id))
 
 	canRun, policyOptions, err := s.checkIfStart()
 	if err != nil {
@@ -1218,7 +1225,6 @@ func (s *session) removeParty(p *party) error {
 		go s.waitOnAccess()
 	}
 
-	s.io.DeleteWriter(string(p.id))
 	s.BroadcastMessage("User %v left the session.", p.user)
 
 	// Emit session leave event to both the Audit Log as well as over the
