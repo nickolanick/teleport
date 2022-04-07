@@ -453,6 +453,8 @@ const (
 	// Ping is the common backend for all Ping Identity-branded identity
 	// providers (including PingOne, PingFederate, etc).
 	Ping = "ping"
+	// JumpCloud is an identity provider.
+	JumpCloud = "jumpcloud"
 )
 
 const (

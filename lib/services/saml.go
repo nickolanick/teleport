@@ -212,7 +212,7 @@ func GetSAMLServiceProvider(sc types.SAMLConnector, clock clockwork.Clock) (*sam
 	}
 
 	// adfs specific settings
-	if sc.GetProvider() == teleport.ADFS {
+	if sc.GetProvider() == teleport.ADFS || sc.GetProvider() == teleport.JumpCloud {
 		log.WithFields(log.Fields{
 			trace.Component: teleport.ComponentSAML,
 		}).Debug("Setting ADFS values.")
