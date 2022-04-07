@@ -16,7 +16,7 @@
 
 */
 
-package main
+package dbcmd
 
 import (
 	"fmt"
@@ -90,7 +90,7 @@ type cliCommandBuilder struct {
 	exe execer
 }
 
-func newCmdBuilder(tc *client.TeleportClient, profile *client.ProfileStatus,
+func NewCmdBuilder(tc *client.TeleportClient, profile *client.ProfileStatus,
 	db *tlsca.RouteToDatabase, rootClusterName string, opts ...ConnectCommandFunc,
 ) *cliCommandBuilder {
 	var options connectionCommandOpts
@@ -119,7 +119,7 @@ func newCmdBuilder(tc *client.TeleportClient, profile *client.ProfileStatus,
 	}
 }
 
-func (c *cliCommandBuilder) getConnectCommand() (*exec.Cmd, error) {
+func (c *cliCommandBuilder) GetConnectCommand() (*exec.Cmd, error) {
 	switch c.db.Protocol {
 	case defaults.ProtocolPostgres:
 		return c.getPostgresCommand(), nil
@@ -151,8 +151,6 @@ func (c *cliCommandBuilder) getPostgresCommand() *exec.Cmd {
 func (c *cliCommandBuilder) getCockroachCommand() *exec.Cmd {
 	// If cockroach CLI client is not available, fallback to psql.
 	if _, err := c.exe.LookPath(cockroachBin); err != nil {
-		log.Debugf("Couldn't find %q client in PATH, falling back to %q: %v.",
-			cockroachBin, postgresBin, err)
 		return exec.Command(postgresBin,
 			postgres.GetConnString(db.New(c.tc, *c.db, *c.profile, c.rootCluster, c.host, c.port), c.options.noTLS))
 	}
@@ -396,4 +394,32 @@ func (c *cliCommandBuilder) getSQLServerCommand() *exec.Cmd {
 	}
 
 	return exec.Command(mssqlBin, args...)
+}
+
+type connectionCommandOpts struct {
+	localProxyPort int
+	localProxyHost string
+	caPath         string
+	noTLS          bool
+}
+
+type ConnectCommandFunc func(*connectionCommandOpts)
+
+func WithLocalProxy(host string, port int, caPath string) ConnectCommandFunc {
+	return func(opts *connectionCommandOpts) {
+		opts.localProxyPort = port
+		opts.localProxyHost = host
+		opts.caPath = caPath
+	}
+}
+
+// WithNoTLS is the connect command option that makes the command connect
+// without TLS.
+//
+// It is used when connecting through the local proxy that was started in
+// mutual TLS mode (i.e. with a client certificate).
+func WithNoTLS() ConnectCommandFunc {
+	return func(opts *connectionCommandOpts) {
+		opts.noTLS = true
+	}
 }
