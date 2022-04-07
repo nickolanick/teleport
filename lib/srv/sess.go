@@ -248,14 +248,6 @@ func (s *SessionRegistry) leaveSession(party *party) error {
 	return nil
 }
 
-func (s *SessionRegistry) EndSession(sess *session, ctx *ServerContext) {
-	// emit session end event
-	sess.emitSessionEndEvent(ctx)
-
-	// close the session
-	sess.Close()
-}
-
 // NotifyWinChange is called to notify all members in the party that the PTY
 // size has changed. The notification is sent as a global SSH request and it
 // is the responsibility of the client to update it's window size upon receipt.
@@ -422,6 +414,9 @@ type session struct {
 	cgroupID uint64
 
 	displayParticipantRequirements bool
+
+	// closingContext is the server context which closed this session.
+	closingContext *ServerContext
 }
 
 // newSession creates a new session with a given ID within a given context.
@@ -563,7 +558,6 @@ func (s *session) Stop() {
 	case <-s.stopC:
 		return
 	default:
-		// triggers term.Kill for interactive sessions
 		close(s.stopC)
 	}
 	s.mu.Unlock()
@@ -622,6 +616,8 @@ func (s *session) Close() {
 
 		// Close the session recorder
 		if s.recorder != nil {
+			// emit session end event
+			s.emitSessionEndEvent()
 			if err := s.recorder.Close(s.serverCtx); err != nil {
 				s.log.WithError(err).Warn("Failed to close recorder.")
 			}
@@ -800,7 +796,26 @@ func (s *session) emitSessionLeaveEvent(ctx *ServerContext) {
 	}
 }
 
-func (s *session) emitSessionEndEvent(ctx *ServerContext) {
+func (s *session) setClosingContext(ctx *ServerContext) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closingContext = ctx
+}
+
+func (s *session) getClosingContext() *ServerContext {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closingContext != nil {
+		return s.closingContext
+	}
+
+	return s.scx
+}
+
+func (s *session) emitSessionEndEvent() {
+	ctx := s.getClosingContext()
+
 	start, end := s.startTime, time.Now().UTC()
 	sessionEndEvent := &apievents.SessionEnd{
 		Metadata: apievents.Metadata{
@@ -1147,7 +1162,8 @@ func (s *session) startExec(channel ssh.Channel, ctx *ServerContext) error {
 			ctx.Errorf("Failed to close enhanced recording (exec) session: %v: %v.", s.id, err)
 		}
 
-		s.registry.EndSession(s, ctx)
+		// close the session
+		s.Close()
 	}()
 
 	return nil
@@ -1263,6 +1279,7 @@ func (s *session) SetLingerTTL(ttl time.Duration) {
 // parties in the session, end the session.
 func (s *session) lingerAndDie(party *party) {
 	s.log.Debugf("Session %v has no active party members.", s.id)
+
 	time.Sleep(s.GetLingerTTL())
 	if len(s.getParties()) != 0 {
 		s.log.Infof("Session %v has become active again.", s.id)
@@ -1270,7 +1287,8 @@ func (s *session) lingerAndDie(party *party) {
 	}
 
 	s.log.Infof("Session %v will be garbage collected.", s.id)
-	s.registry.EndSession(s, party.ctx)
+	s.setClosingContext(party.ctx)
+	s.Close()
 }
 
 func (s *session) getNamespace() string {
