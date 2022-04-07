@@ -553,9 +553,7 @@ func (s *session) Stop() {
 	s.log.Infof("Stopping session %v.", s.id)
 
 	// close io copy loops
-	if s.io != nil {
-		s.io.Close()
-	}
+	s.io.Close()
 
 	// Close and kill terminal
 	if s.term != nil {
@@ -648,11 +646,7 @@ outer:
 
 func (s *session) BroadcastMessage(format string, args ...interface{}) {
 	if s.access.IsModerated() && !services.IsRecordAtProxy(s.scx.SessionRecordingConfig.GetMode()) {
-		err := s.io.BroadcastMessage(fmt.Sprintf(format, args...))
-
-		if err != nil {
-			s.log.Debugf("Failed to broadcast message: %v", err)
-		}
+		s.io.BroadcastMessage(fmt.Sprintf(format, args...))
 	}
 }
 
@@ -849,13 +843,10 @@ func (s *session) launch(ctx *ServerContext) error {
 	s.BroadcastMessage("Connecting to %v over SSH", ctx.srv.GetInfo().GetHostname())
 	s.state = types.SessionState_SessionStateRunning
 
-	err := s.io.On()
-	if err != nil {
-		s.log.Warnf("Failed to turn enable IO: %v.", err)
-	}
+	s.io.On()
 
 	s.stateUpdate.Broadcast()
-	err = s.trackerUpdateState(types.SessionState_SessionStateRunning)
+	err := s.trackerUpdateState(types.SessionState_SessionStateRunning)
 	if err != nil {
 		s.log.Warnf("Failed to set tracker state to %v", types.SessionState_SessionStateRunning)
 	}

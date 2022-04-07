@@ -952,11 +952,7 @@ func (s *session) join(p *party) error {
 
 func (s *session) BroadcastMessage(format string, args ...interface{}) {
 	if s.accessEvaluator.IsModerated() && s.tty {
-		err := s.io.BroadcastMessage(fmt.Sprintf(format, args...))
-
-		if err != nil {
-			s.log.Debugf("Failed to broadcast message: %v", err)
-		}
+		s.io.BroadcastMessage(fmt.Sprintf(format, args...))
 	}
 }
 

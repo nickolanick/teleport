@@ -19,7 +19,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/gravitational/trace"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -72,7 +71,8 @@ func NewTermManager() *TermManager {
 	}
 }
 
-func (g *TermManager) writeToClients(p []byte) (int, error) {
+// writeToClients writes to underlying clients
+func (g *TermManager) writeToClients(p []byte) {
 	g.lastWasBroadcast = false
 	g.history = truncateFront(append(g.history, p...), maxHistoryBytes)
 
@@ -93,7 +93,6 @@ func (g *TermManager) writeToClients(p []byte) (int, error) {
 		}
 	}
 
-	return len(p), nil
 }
 
 func (g *TermManager) TerminateNotifier() <-chan struct{} {
@@ -109,12 +108,13 @@ func (g *TermManager) Write(p []byte) (int, error) {
 	}
 
 	if g.on {
-		return g.writeToClients(p)
+		g.writeToClients(p)
+	} else {
+		// Only keep the last maxPausedHistoryBytes of stdout/stderr while the session is paused.
+		// The alternative is flushing to disk but this should be a pretty rare occurrence and shouldn't be an issue in practice.
+		g.buffer = truncateFront(append(g.buffer, p...), maxPausedHistoryBytes)
 	}
 
-	// Only keep the last maxPausedHistoryBytes of stdout/stderr while the session is paused.
-	// The alternative is flushing to disk but this should be a pretty rare occurrence and shouldn't be an issue in practice.
-	g.buffer = truncateFront(append(g.buffer, p...), maxPausedHistoryBytes)
 	return len(p), nil
 }
 
@@ -172,13 +172,8 @@ func (g *TermManager) Read(p []byte) (int, error) {
 	}
 }
 
-// writeUnconditional allows unconditional writes to the underlying writers.
-func (g *TermManager) writeUnconditional(p []byte) (int, error) {
-	return g.writeToClients(p)
-}
-
 // BroadcastMessage injects a message into the stream.
-func (g *TermManager) BroadcastMessage(message string) error {
+func (g *TermManager) BroadcastMessage(message string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	data := []byte("Teleport > " + message + "\r\n")
@@ -187,18 +182,17 @@ func (g *TermManager) BroadcastMessage(message string) error {
 	} else {
 		g.lastWasBroadcast = true
 	}
-	_, err := g.writeUnconditional(data)
-	return trace.Wrap(err)
+
+	g.writeToClients(data)
 }
 
 // On allows data to flow through the manager.
-func (g *TermManager) On() error {
+func (g *TermManager) On() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.on = true
 	g.readStateUpdate.Broadcast()
-	_, err := g.writeUnconditional(g.buffer)
-	return trace.Wrap(err)
+	g.writeToClients(g.buffer)
 }
 
 // Off buffers incoming writes and reads until turned on again.
