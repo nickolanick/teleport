@@ -124,8 +124,10 @@ func (s *SessionRegistry) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// End all sessions and allow session cleanup
+	// goroutines to complete.
 	for _, se := range s.sessions {
-		se.Close()
+		se.Stop()
 	}
 
 	s.log.Debug("Closing Session Registry.")
@@ -415,8 +417,8 @@ type session struct {
 
 	displayParticipantRequirements bool
 
-	// closingContext is the server context which closed this session.
-	closingContext *ServerContext
+	// endingContext is the server context which closed this session.
+	endingContext *ServerContext
 }
 
 // newSession creates a new session with a given ID within a given context.
@@ -508,7 +510,8 @@ func newSession(id rsession.ID, r *SessionRegistry, ctx *ServerContext) (*sessio
 	sess.io.OnWriteError = func(idString string, err error) {
 		if idString == sessionRecorderID {
 			sess.log.Error("Failed to write to session recorder, stopping session.")
-			sess.Stop()
+			// stop in goroutine to avoid deadlock
+			go sess.Stop()
 		}
 	}
 
@@ -551,11 +554,13 @@ func (s *session) Recorder() events.StreamWriter {
 	return s.recorder
 }
 
-// Stop kills the active session, forcing all clients to disconnect.
+// Stop ends the active session and forces all clients to disconnect.
+// This will trigger background goroutines to complete session cleanup.
 func (s *session) Stop() {
 	s.mu.Lock()
 	select {
 	case <-s.stopC:
+		s.mu.Unlock()
 		return
 	default:
 		close(s.stopC)
@@ -565,24 +570,32 @@ func (s *session) Stop() {
 	s.BroadcastMessage("Stopping session...")
 	s.log.Infof("Stopping session %v.", s.id)
 
+	// close io copy loops
+	if s.io != nil {
+		s.io.Close()
+	}
+
+	// Kill and close terminal
 	if s.term != nil {
+		if err := s.term.Kill(); err != nil {
+			s.log.Debugf("Failed killing the shell: %v", err)
+		}
 		s.term.Close()
 	}
 
-	// Close io copy loops
-	s.io.Close()
+	// emit session end event
+	s.emitSessionEndEvent()
 
-	// Running p.Close under session lock would cause a deadlock,
-	// so we close parties in the background.
-	go func() {
-		for _, p := range s.getParties() {
-			err := p.Close()
-			if err != nil {
-				s.log.WithError(err).Errorf("Failed to close party.")
-			}
+	for _, p := range s.getParties() {
+		err := p.Close()
+		if err != nil {
+			s.log.WithError(err).Errorf("Failed to close party.")
 		}
-	}()
+	}
 
+	// Set session state to terminated
+	s.stateUpdate.L.Lock()
+	defer s.stateUpdate.L.Unlock()
 	s.state = types.SessionState_SessionStateTerminated
 	s.stateUpdate.Broadcast()
 	err := s.trackerUpdateState(types.SessionState_SessionStateTerminated)
@@ -591,38 +604,37 @@ func (s *session) Stop() {
 	}
 }
 
-// Close ends the active session freeing all resources.
+// Close ends the active session and frees all resources. This should only be called
+// by the creator of the session, other closers should use Stop instead. Calling this
+// prematurely can result in missing audit events, session recordings, and other
+// unexpected errors.
 func (s *session) Close() {
-	s.closeOnce.Do(func() {
-		s.Stop()
+	s.Stop()
 
-		s.BroadcastMessage("Closing session...")
-		s.log.Infof("Closing session %v.", s.id)
+	s.BroadcastMessage("Closing session...")
+	s.log.Infof("Closing session %v.", s.id)
 
-		serverSessions.Dec()
+	serverSessions.Dec()
 
-		// remove session from registry
-		s.registry.removeSession(s)
+	// remove session from registry
+	s.registry.removeSession(s)
 
-		// Remove the session from the backend.
-		if s.scx.srv.GetSessionServer() != nil {
-			err := s.scx.srv.GetSessionServer().DeleteSession(s.getNamespace(), s.id)
-			if err != nil {
-				s.log.Errorf("Failed to remove active session: %v: %v. "+
-					"Access to backend may be degraded, check connectivity to backend.",
-					s.id, err)
-			}
+	// Remove the session from the backend.
+	if s.scx.srv.GetSessionServer() != nil {
+		err := s.scx.srv.GetSessionServer().DeleteSession(s.getNamespace(), s.id)
+		if err != nil {
+			s.log.Errorf("Failed to remove active session: %v: %v. "+
+				"Access to backend may be degraded, check connectivity to backend.",
+				s.id, err)
 		}
+	}
 
-		// Close the session recorder
-		if s.recorder != nil {
-			// emit session end event
-			s.emitSessionEndEvent()
-			if err := s.recorder.Close(s.serverCtx); err != nil {
-				s.log.WithError(err).Warn("Failed to close recorder.")
-			}
+	// Close the session recorder
+	if s.recorder != nil {
+		if err := s.recorder.Close(s.serverCtx); err != nil {
+			s.log.WithError(err).Warn("Failed to close recorder.")
 		}
-	})
+	}
 }
 
 func (s *session) waitOnAccess() error {
@@ -796,25 +808,25 @@ func (s *session) emitSessionLeaveEvent(ctx *ServerContext) {
 	}
 }
 
-func (s *session) setClosingContext(ctx *ServerContext) {
+func (s *session) setEndingContext(ctx *ServerContext) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.closingContext = ctx
+	s.endingContext = ctx
 }
 
-func (s *session) getClosingContext() *ServerContext {
+func (s *session) getEndingContext() *ServerContext {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.closingContext != nil {
-		return s.closingContext
+	if s.endingContext != nil {
+		return s.endingContext
 	}
 
 	return s.scx
 }
 
 func (s *session) emitSessionEndEvent() {
-	ctx := s.getClosingContext()
+	ctx := s.getEndingContext()
 
 	start, end := s.startTime, time.Now().UTC()
 	sessionEndEvent := &apievents.SessionEnd{
@@ -962,21 +974,8 @@ func (s *session) launch(ctx *ServerContext) error {
 				s.log.Warningf("Failed to broadcast session result: %v", err)
 			}
 		}
-		if err != nil {
-			s.log.Infof("Shell exited with error: %v", err)
-		} else {
-			// no error? this means the command exited cleanly: no need
-			// for this session to "linger" after this.
-			s.SetLingerTTL(time.Duration(0))
-		}
-	}()
 
-	// wait for the session to end before the shell, kill the shell
-	go func() {
-		<-s.stopC
-		if err := s.term.Kill(); err != nil {
-			s.log.Debugf("Failed killing the shell: %v", err)
-		}
+		s.Close()
 	}()
 
 	return nil
@@ -1162,7 +1161,6 @@ func (s *session) startExec(channel ssh.Channel, ctx *ServerContext) error {
 			ctx.Errorf("Failed to close enhanced recording (exec) session: %v: %v.", s.id, err)
 		}
 
-		// close the session
 		s.Close()
 	}()
 
@@ -1254,9 +1252,9 @@ func (s *session) removeParty(p *party) error {
 	s.io.DeleteWriter(string(p.id))
 	s.BroadcastMessage("User %v left the session.", p.user)
 
-	// If the leaving party is the last one in the session
-	// start the lingerAndDie goroutine
-	if len(s.parties) == 0 {
+	// If the leaving party was the last one in the
+	// session, start the lingerAndDie goroutine.
+	if len(s.parties) == 0 && !s.isStopped() {
 		go s.lingerAndDie(p)
 	}
 
@@ -1275,6 +1273,15 @@ func (s *session) SetLingerTTL(ttl time.Duration) {
 	s.lingerTTL = ttl
 }
 
+func (s *session) isStopped() bool {
+	select {
+	case <-s.stopC:
+		return true
+	default:
+		return false
+	}
+}
+
 // If after a short linger duration there are no active
 // parties in the session, end the session.
 func (s *session) lingerAndDie(party *party) {
@@ -1287,8 +1294,13 @@ func (s *session) lingerAndDie(party *party) {
 	}
 
 	s.log.Infof("Session %v will be garbage collected.", s.id)
-	s.setClosingContext(party.ctx)
-	s.Close()
+
+	// set closing context to the leaving party to show who ended the session.
+	s.setEndingContext(party.ctx)
+
+	// Stop the session, and let the background processes
+	// complete cleanup and close the session.
+	s.Stop()
 }
 
 func (s *session) getNamespace() string {
@@ -1325,7 +1337,7 @@ func (s *session) exportParticipants() []string {
 	defer s.mu.Unlock()
 
 	// If there are 0 participants, this is an exec session.
-	// Return the user from the session context.
+	// Use the user from the session context.
 	if len(s.participants) == 0 {
 		return []string{s.scx.Identity.TeleportUser}
 	}
@@ -1453,7 +1465,7 @@ func (s *session) addParty(p *party, mode types.SessionParticipantMode) error {
 		}
 
 		if !canStart && services.IsRecordAtProxy(p.ctx.SessionRecordingConfig.GetMode()) {
-			go s.Close()
+			go s.Stop()
 			return trace.AccessDenied("session requires additional moderation but is in proxy-record mode")
 		}
 	}
