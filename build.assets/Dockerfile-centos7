@@ -15,12 +15,56 @@ RUN (groupadd ci --gid=$GID -o && useradd ci --uid=$UID --gid=$GID --create-home
 
 # Install dev tools (make, etc) and a Perl package needed to build OpenSSL.
 RUN yum groupinstall -y "Development Tools"
-RUN yum install -y pam-devel net-tools tree git zip libatomic perl-IPC-Cmd && \
+RUN yum install -y epel-release && \
+    yum update -y && \
+    yum install -y \
+        cmake3 \
+        git \
+        libatomic \
+        libudev-devel \
+        net-tools \
+        pam-devel \
+        perl-IPC-Cmd \
+        tree \
+        zip \
+        zlib-devel && \
     yum clean all
 
 # Install etcd.
 RUN (curl -L https://github.com/coreos/etcd/releases/download/v3.3.9/etcd-v3.3.9-linux-amd64.tar.gz | tar -xz && \
      cp etcd-v3.3.9-linux-amd64/etcd* /bin/)
+
+# Instal openssl.
+# Pulled from source because repository versions are too old.
+# The linking is so `make build/tsh` finds the library where it is expected.
+RUN git clone --depth=1 git://git.openssl.org/openssl.git -b OpenSSL_1_1_1n && \
+    cd openssl && \
+    ./config --release && \
+    make && \
+    make install && \
+    mkdir -p /usr/lib/x86_64-linux-gnu && \
+    ln -s /usr/local/lib64/libcrypto.a /usr/lib/x86_64-linux-gnu/
+
+# Install libcbor.
+# The linking is so `make build/tsh` finds the library where it is expected.
+RUN git clone --depth=1 https://github.com/PJK/libcbor.git -b v0.9.0 && \
+    cd libcbor && \
+    cmake3 -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCBOR_CUSTOM_ALLOC=ON . && \
+    make && \
+    make install && \
+    ln -s /usr/local/lib64/libcbor.{a,so} /usr/local/lib/
+
+# Install libfido2.
+# Depends on libcbor, openssl, zlib-devel and libudev-devel.
+# The linking is so `make build/tsh` finds the library where it is expected.
+RUN git clone --depth=1 https://github.com/Yubico/libfido2.git -b 1.10.0 && \
+    cd libfido2 && \
+    cmake3 -DCMAKE_BUILD_TYPE=Release . && \
+    make && \
+    make install && \
+    ln -s /usr/local/lib64/libfido2.{a,so} /usr/local/lib/ && \
+    echo /usr/local/lib64 > /etc/ld.so.conf.d/libfido2.conf && \
+    ldconfig
 
 # Install Go.
 RUN mkdir -p /opt && cd /opt && curl https://storage.googleapis.com/golang/$GOLANG_VERSION.linux-amd64.tar.gz | tar xz && \
@@ -44,7 +88,7 @@ RUN mkdir -p $RUSTUP_HOME && chmod a+w $RUSTUP_HOME && \
 
 RUN chmod a-w /
 
-USER ci
+# USER ci
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain $RUST_VERSION && \
     rustup --version && \
     cargo --version && \
