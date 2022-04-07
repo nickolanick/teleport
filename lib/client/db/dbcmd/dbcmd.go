@@ -236,20 +236,18 @@ func (c *cliCommandBuilder) getMySQLCommand() (*exec.Cmd, error) {
 		return exec.Command(mariadbBin, args...), nil
 	}
 
-	// Check for mysql binary. Return with error as mysql and mariadb are missing. There is nothing else we can do here.
-	if !c.isMySQLBinAvailable() {
-		return nil, trace.NotFound("neither %q nor %q CLI clients were found, please make sure an appropriate CLI client is available in $PATH", mysqlBin, mariadbBin)
+	// Check for mysql binary.
+	if c.isMySQLBinAvailable() {
+		// Check which flavor is installed. Otherwise, we don't know which ssl flag to use.
+		// At the moment of writing mysql binary shipped by Oracle and MariaDB accept different ssl parameters and have the same name.
+		mySQLMariaDBFlavor, err := c.isMySQLBinMariaDBFlavor()
+		if mySQLMariaDBFlavor && err == nil {
+			args := c.getMariaDBArgs()
+			return exec.Command(mysqlBin, args...), nil
+		}
 	}
 
-	// Check which flavor is installed. Otherwise, we don't know which ssl flag to use.
-	// At the moment of writing mysql binary shipped by Oracle and MariaDB accept different ssl parameters and have the same name.
-	mySQLMariaDBFlavor, err := c.isMySQLBinMariaDBFlavor()
-	if mySQLMariaDBFlavor && err == nil {
-		args := c.getMariaDBArgs()
-		return exec.Command(mysqlBin, args...), nil
-	}
-
-	// Either we failed to check the flavor or binary comes from Oracle. Regardless return mysql/Oracle command.
+	// Fallback to default mysql command.
 	return c.getMySQLOracleCommand(), nil
 }
 

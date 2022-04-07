@@ -219,14 +219,20 @@ func TestCliCommandBuilderGetConnectCommand(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:         "no mysql nor mariadb",
+			name:         "no mysql nor mariadb returns default mysql command",
 			dbProtocol:   defaults.ProtocolMySQL,
 			databaseName: "mydb",
 			execer: &fakeExec{
 				execOutput: map[string][]byte{},
 			},
-			cmd:     []string{},
-			wantErr: true,
+			cmd: []string{"mysql",
+				"--defaults-group-suffix=_db.example.com-mysql",
+				"--user", "myUser",
+				"--database", "mydb",
+				"--port", "12345",
+				"--host", "localhost",
+				"--protocol", "TCP"},
+			wantErr: false,
 		},
 		{
 			name:         "mongodb (legacy)",
