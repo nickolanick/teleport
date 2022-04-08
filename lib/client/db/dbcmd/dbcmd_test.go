@@ -2,6 +2,9 @@ package dbcmd
 
 import (
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/gravitational/teleport/lib/client"
@@ -14,11 +17,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type commandPathBehavior = int
+
+const (
+	system commandPathBehavior = iota
+	forceAbsolute
+	forceRelative
+)
+
 // fakeExec implements execer interface for mocking purposes.
 type fakeExec struct {
 	// execOutput maps binary name and output that should be returned on RunCommand().
 	// Map is also being used to check if a binary exist. Command line args are not supported.
 	execOutput map[string][]byte
+	// commandPathBehavior controls what kind of path will be returned from fakeExec.Command:
+	// * system just calls exec.Command
+	// * forceAbsolute guarantees that the returned cmd.Path will be absolute
+	// * forceRelative guarantees that the returned cmd.Path will be relative (just the binary name)
+	commandPathBehavior commandPathBehavior
 }
 
 func (f fakeExec) RunCommand(cmd string, _ ...string) ([]byte, error) {
@@ -35,6 +51,28 @@ func (f fakeExec) LookPath(path string) (string, error) {
 		return "", nil
 	}
 	return "", trace.NotFound("not found")
+}
+
+func (f fakeExec) Command(name string, arg ...string) *exec.Cmd {
+	switch f.commandPathBehavior {
+	case system:
+		return exec.Command(name, arg...)
+	case forceAbsolute:
+		path, err := os.Getwd()
+		if err != nil {
+			panic(err)
+		}
+
+		absolutePath := filepath.Join(path, name)
+		cmd := exec.Command(absolutePath, arg...)
+
+		return cmd
+	case forceRelative:
+		cmd := exec.Command(name, arg...)
+		cmd.Path = filepath.Base(cmd.Path)
+		return cmd
+	}
+	panic("Unknown commandPathBehavior")
 }
 
 func TestCliCommandBuilderGetConnectCommand(t *testing.T) {
@@ -67,6 +105,7 @@ func TestCliCommandBuilderGetConnectCommand(t *testing.T) {
 			name:         "postgres",
 			dbProtocol:   defaults.ProtocolPostgres,
 			databaseName: "mydb",
+			execer:       &fakeExec{},
 			cmd: []string{"psql",
 				"postgres://myUser@localhost:12345/mydb?sslrootcert=/tmp/keys/example.com/cas/root.pem&" +
 					"sslcert=/tmp/keys/example.com/bob-db/db.example.com/mysql-x509.pem&" +
@@ -77,6 +116,7 @@ func TestCliCommandBuilderGetConnectCommand(t *testing.T) {
 			name:         "postgres no TLS",
 			dbProtocol:   defaults.ProtocolPostgres,
 			databaseName: "mydb",
+			execer:       &fakeExec{},
 			noTLS:        true,
 			cmd: []string{"psql",
 				"postgres://myUser@localhost:12345/mydb"},
@@ -299,6 +339,7 @@ func TestCliCommandBuilderGetConnectCommand(t *testing.T) {
 			name:         "sqlserver",
 			dbProtocol:   defaults.ProtocolSQLServer,
 			databaseName: "mydb",
+			execer:       &fakeExec{},
 			cmd: []string{mssqlBin,
 				"-S", "localhost,12345",
 				"-U", "myUser",
@@ -310,6 +351,7 @@ func TestCliCommandBuilderGetConnectCommand(t *testing.T) {
 		{
 			name:       "redis-cli",
 			dbProtocol: defaults.ProtocolRedis,
+			execer:     &fakeExec{},
 			cmd: []string{"redis-cli",
 				"-h", "localhost",
 				"-p", "12345",
@@ -322,6 +364,7 @@ func TestCliCommandBuilderGetConnectCommand(t *testing.T) {
 			name:         "redis-cli with db",
 			dbProtocol:   defaults.ProtocolRedis,
 			databaseName: "2",
+			execer:       &fakeExec{},
 			cmd: []string{"redis-cli",
 				"-h", "localhost",
 				"-p", "12345",
@@ -334,6 +377,7 @@ func TestCliCommandBuilderGetConnectCommand(t *testing.T) {
 		{
 			name:       "redis-cli no TLS",
 			dbProtocol: defaults.ProtocolRedis,
+			execer:     &fakeExec{},
 			noTLS:      true,
 			cmd: []string{"redis-cli",
 				"-h", "localhost",
@@ -376,4 +420,115 @@ func TestCliCommandBuilderGetConnectCommand(t *testing.T) {
 			require.Equal(t, tt.cmd, got.Args)
 		})
 	}
+}
+
+// // Similar to fakeExec, but always returns a Command with an absolute path.
+// type fakeAbsolutePathExec struct {
+// 	// execOutput maps binary name and output that should be returned on RunCommand().
+// 	// Map is also being used to check if a binary exist. Command line args are not supported.
+// 	execOutput map[string][]byte
+// }
+
+// func (f fakeAbsolutePathExec) RunCommand(cmd string, _ ...string) ([]byte, error) {
+// 	out, found := f.execOutput[cmd]
+// 	if !found {
+// 		return nil, errors.New("binary not found")
+// 	}
+
+// 	return out, nil
+// }
+
+// func (f fakeAbsolutePathExec) LookPath(path string) (string, error) {
+// 	if _, found := f.execOutput[path]; found {
+// 		return "", nil
+// 	}
+// 	return "", trace.NotFound("not found")
+// }
+
+// func (f fakeAbsolutePathExec) Command(name string, arg ...string) *exec.Cmd {
+// 	path, err := os.Getwd()
+// 	if err != nil {
+// 		panic(err)
+// 	}
+
+// 	absolutePath := filepath.Join(path, name)
+// 	cmd := exec.Command(absolutePath, arg...)
+
+// 	return cmd
+// }
+
+func TestGetRelativeConnectCommandConvertsAbsolutePathToRelative(t *testing.T) {
+	conf := &client.Config{
+		HomePath:     t.TempDir(),
+		Host:         "localhost",
+		WebProxyAddr: "localhost",
+		SiteName:     "db.example.com",
+	}
+
+	tc, err := client.NewClient(conf)
+	require.NoError(t, err)
+
+	profile := &client.ProfileStatus{
+		Name:     "example.com",
+		Username: "bob",
+		Dir:      "/tmp",
+	}
+
+	database := &tlsca.RouteToDatabase{
+		Protocol:    defaults.ProtocolPostgres,
+		Database:    "mydb",
+		Username:    "myUser",
+		ServiceName: "postgres",
+	}
+
+	opts := []ConnectCommandFunc{
+		WithLocalProxy("localhost", 12345, ""),
+		WithNoTLS(),
+	}
+
+	c := NewCmdBuilder(tc, profile, database, "root", opts...)
+	c.uid = utils.NewFakeUID()
+	c.exe = &fakeExec{commandPathBehavior: forceAbsolute}
+
+	got, err := c.GetRelativeConnectCommand()
+	require.NoError(t, err)
+	require.Equal(t, "psql postgres://myUser@localhost:12345/mydb", got.String())
+}
+
+func TestGetRelativeConnectCommandIsNoopWhenGivenRelativePath(t *testing.T) {
+	conf := &client.Config{
+		HomePath:     t.TempDir(),
+		Host:         "localhost",
+		WebProxyAddr: "localhost",
+		SiteName:     "db.example.com",
+	}
+
+	tc, err := client.NewClient(conf)
+	require.NoError(t, err)
+
+	profile := &client.ProfileStatus{
+		Name:     "example.com",
+		Username: "bob",
+		Dir:      "/tmp",
+	}
+
+	database := &tlsca.RouteToDatabase{
+		Protocol:    defaults.ProtocolPostgres,
+		Database:    "mydb",
+		Username:    "myUser",
+		ServiceName: "postgres",
+	}
+
+	opts := []ConnectCommandFunc{
+		WithLocalProxy("localhost", 12345, ""),
+		WithNoTLS(),
+	}
+
+	c := NewCmdBuilder(tc, profile, database, "root", opts...)
+	c.uid = utils.NewFakeUID()
+	c.exe = &fakeExec{commandPathBehavior: forceRelative}
+
+	got, err := c.GetRelativeConnectCommand()
+	require.NoError(t, err)
+	require.Equal(t, "psql postgres://myUser@localhost:12345/mydb", got.String())
 }

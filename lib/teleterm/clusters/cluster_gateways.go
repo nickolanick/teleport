@@ -81,7 +81,7 @@ func buildCliCommand(c *Cluster, gw *gateway.Gateway) (*exec.Cmd, error) {
 
 	cmd, err := dbcmd.NewCmdBuilder(c.clusterClient, &c.status, &routeToDb, c.URI.GetRootClusterName(),
 		dbcmd.WithLocalProxy(gw.LocalAddress, gw.LocalPortInt(), ""),
-		dbcmd.WithNoTLS()).GetConnectCommand()
+		dbcmd.WithNoTLS()).GetRelativeConnectCommand()
 
 	if err != nil {
 		return nil, trace.Wrap(err)
